@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+httpx
+google-api-python-client
+google-auth-oauthlib
+mcp
+chromadb
+ollama
+beautifulsoup4
+playwright
+duckduckgo-search
