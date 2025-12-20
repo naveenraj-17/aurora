@@ -6,6 +6,7 @@ import platform
 import shutil
 import threading
 import webbrowser
+import launch_browser
 
 # ANSI colors
 class Colors:
@@ -90,60 +91,8 @@ def start_frontend():
     shell_cmd = True if sys.platform == "win32" else False
     return subprocess.Popen(["npm", "run", "dev"], cwd=FRONTEND_DIR, shell=shell_cmd)
 
-def open_browser():
-    url = "http://localhost:3000"
-    print_step(f"Opening {url}...")
-    
-    # Give servers a moment to start
-    time.sleep(3)
-    
-    # Browsers to try for "app" mode
-    browsers = ["google-chrome", "chromium", "brave-browser", "msedge"]
-    if sys.platform == "darwin":
-        browsers = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", 
-                    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
-    elif sys.platform == "win32":
-        browsers = ["chrome.exe", "msedge.exe"]
-    
-    browser_cmd = None
-    for b in browsers:
-        if shutil.which(b):
-            browser_cmd = b
-            break
-        # Check absolute paths for macOS
-        if sys.platform == "darwin" and os.path.exists(b):
-            browser_cmd = b
-            break
-            
-    if browser_cmd:
-        print(f"Opening in app mode using {browser_cmd}...")
-        try:
-            subprocess.Popen([browser_cmd, f"--app={url}"])
-            return
-        except Exception as e:
-            print(f"Failed to open in app mode: {e}")
-    
-    # Fallback
-    print("Opening in default browser...")
-    webbrowser.open(url)
-
-def main():
-    print(f"{Colors.CYAN}=== Learn Agents Setup & Start ==={Colors.ENDC}")
-    
-    # 1. Checks
-    if not check_command("node", "Please install Node.js."):
-        sys.exit(1)
-        
-    # 2. Install
-    python_exe = install_backend()
-    install_frontend()
-    
-    # 3. Start
-    backend_process = start_backend(python_exe)
-    frontend_process = start_frontend()
-    
     # 4. Browser
-    threading.Thread(target=open_browser).start()
+    threading.Thread(target=launch_browser.open_browser).start()
     
     print(f"\n{Colors.GREEN}{Colors.BOLD}Application is running!{Colors.ENDC}")
     print(f"{Colors.WARNING}Press Ctrl+C to stop servers and exit.{Colors.ENDC}\n")
