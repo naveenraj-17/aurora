@@ -2,9 +2,13 @@
 import os
 import json
 
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "settings.json")
-CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "credentials.json")
-TOKEN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "token.json")
+DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
+
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+CREDENTIALS_FILE = os.path.join(DATA_DIR, "credentials.json")
+TOKEN_FILE = os.path.join(DATA_DIR, "token.json")
 
 def load_settings():
     default_settings = {

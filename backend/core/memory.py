@@ -9,6 +9,9 @@ class MemoryStore:
         # Initialize ChromaDB
         # We use a persistent client so data survives restarts
         self.storage_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "chroma_db")
+        if not os.path.exists(self.storage_path):
+            os.makedirs(self.storage_path)
+            
         self.client = chromadb.PersistentClient(path=self.storage_path)
         self.collection = self.client.get_or_create_collection(name="chat_history")
         self.model = model
