@@ -4,7 +4,7 @@ Aurora is a powerful, privacy-first AI agent designed to run locally on your mac
 
 ## 🎥 See Aurora in action
 
-<video controls src="demo/main-demo.mp4" width="100%"></video>
+![Aurora Demo](demo/main-demo.gif)
 
 ---
 
