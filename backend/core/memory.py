@@ -65,3 +65,23 @@ class MemoryStore:
         except Exception as e:
             print(f"Error querying memory: {e}")
             return []
+
+    def clear_memory(self):
+        try:
+            # Delete all items instead of dropping collection to keep UUID stable
+            # fetch all ids first
+            result = self.collection.get()
+            if result and 'ids' in result and result['ids']:
+                self.collection.delete(ids=result['ids'])
+                
+            print("DEBUG: Memory Store cleared (items deleted).")
+            return True
+        except Exception as e:
+            print(f"Error clearing memory: {e}")
+            # Fallback: try to recreate
+            try:
+                self.client.delete_collection("chat_history")
+                self.collection = self.client.create_collection(name="chat_history")
+                return True
+            except:
+                return False

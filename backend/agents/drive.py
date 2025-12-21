@@ -40,7 +40,7 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Name of the file/folder"},
-                    "mimeType": {"type": "string", "description": "MIME type (e.g. 'application/vnd.google-apps.folder', 'application/vnd.google-apps.document', 'text/plain')"},
+                    "mimeType": {"type": "string", "description": "MIME type (Default to 'application/vnd.google-apps.document' for text docs, 'application/vnd.google-apps.spreadsheet' for sheets if not specified)"},
                     "content": {"type": "string", "description": "Text content for the file (optional)"}
                 },
                 "required": ["name", "mimeType"]

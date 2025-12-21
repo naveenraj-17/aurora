@@ -24,3 +24,26 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+@layer utilities {
+  /* Chrome, Safari, Edge, Opera */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #09090b; /* zinc-950 */
+    border-left: 1px solid #18181b; /* zinc-900 */
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #27272a; /* zinc-800 */
+    border-radius: 9999px;
+    border: 2px solid #09090b; /* Padding effect */
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3f3f46; /* zinc-700 */
+  }
+}

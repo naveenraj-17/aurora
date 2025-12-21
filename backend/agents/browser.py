@@ -117,53 +117,49 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
                     page = await ctx.new_page()
                     
                     # Navigate to Google
-                    await page.goto("https://www.google.com", wait_until="domcontentloaded")
-                    
-                    # Handle "Before you continue" cookie consent if it appears (common in EU/headless)
+                    await page.goto("https://www.google.com/search?q=" + query, wait_until="domcontentloaded")
+
+                    # Handle "Before you continue" cookie consent
                     try:
-                        await page.click('button:has-text("Reject all")', timeout=2000)
+                        await page.click('button:has-text("Reject all")', timeout=1000)
                     except:
                         pass
-
-                    # Google Search Input (textarea is modern, input is legacy)
-                    try:
-                        await page.fill('textarea[name="q"]', query, timeout=2000)
-                    except:
-                        await page.fill('input[name="q"]', query)
-                        
-                    await page.press('textarea[name="q"]' if await page.is_visible('textarea[name="q"]') else 'input[name="q"]', 'Enter')
                     
-                    # Wait for results
+                    # Wait for results container - generic 'div' fallback if 'div.g' misses
                     try:
-                         await page.wait_for_selector('div#search', timeout=5000) 
+                        await page.wait_for_selector('div#search', timeout=5000)
                     except:
-                         print("DEBUG: Google Selector timeout, attempting to scrape anyway...", file=sys.stderr)
+                        print("DEBUG: Google selector timeout, attempting scrape anyway...", file=sys.stderr)
                     
-                    await page.wait_for_timeout(2000) 
+                    await page.wait_for_timeout(2000)
 
                     # Scrape Google Results
                     results_data = await page.evaluate("""() => {
                         const results = [];
-                        // Google standard results
-                        document.querySelectorAll('div.g').forEach((el, index) => {
-                            if (index >= 6) return; // Limit to 6
+                        // Standard Google Results (div.g) AND generic fallback (a h3 parent)
+                        const items = Array.from(document.querySelectorAll('div.g, div[data-header-feature]'));
+                        
+                        items.forEach((el) => {
+                            if (results.length >= 8) return;
+                            
                             const titleEl = el.querySelector('h3');
                             const linkEl = el.querySelector('a');
-                            const snippetEl = el.querySelector('div[style*="-webkit-line-clamp"]'); 
+                            const snippetEl = el.querySelector('div[style*="-webkit-line-clamp"], div.VwiC3b');
                             
                             if (titleEl && linkEl) {
                                 results.push({
                                     title: titleEl.innerText,
                                     href: linkEl.href,
-                                    body: snippetEl ? snippetEl.innerText : el.innerText.substring(0, 100) + "..."
+                                    body: snippetEl ? snippetEl.innerText : "No snippet available."
                                 });
                             }
                         });
                         return results;
                     }""")
                     
+                    await page.close() # Close page to clean up
+
                     if not results_data:
-                        # Fallback to API if visual scrape failed
                         print("DEBUG: Visual scrape yielded no data. Falling back to API search...", file=sys.stderr)
                     else:
                         summary = "Google Search Results (Visual):\n"
@@ -172,11 +168,10 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
                         return [types.TextContent(type="text", text=summary)]
 
                 except Exception as e:
-                     import time
-                     print(f"visual_search_error: {e}", file=sys.stderr)
-                     if 'page' in locals():
-                         await page.close()
-                     # Fall through to API logic below
+                    print(f"visual_search_error: {e}", file=sys.stderr)
+                    # if 'page' in locals() and not page.is_closed(): # Pylance might complain about page existence
+                    #     await page.close()
+                    # Fall through to API logic below
                 
             # Default / Headless / Fallback
             # Clean query for better API results (DDGS struggles with "recent")
@@ -186,16 +181,14 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
                 
             print(f"DEBUG: Headless Searching web for '{clean_query}'...", file=sys.stderr)
             try:
+                # Use a fresh DDGS instance for every call to avoid session stale issues
                 with DDGS() as ddgs:
                     results = list(ddgs.text(clean_query, max_results=limit))
                 
                 if not results:
                      return [types.TextContent(type="text", text="No results found via API.")]
 
-                summary = "Search Results:\n"
-                if results:
-                    print(f"DEBUG: First Result: {results[0]}", file=sys.stderr)
-                
+                summary = "Search Results (DuckDuckGo):\n"
                 for r in results:
                     summary += f"- [{r['title']}]({r['href']}): {r['body']}\n"
                 

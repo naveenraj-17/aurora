@@ -48,6 +48,22 @@ tool_router: dict[str, str] = {}
 exit_stack = None
 memory_store = None
 
+from collections import deque
+conversation_history = deque(maxlen=10) # Keep last 10 turns
+
+def get_recent_history_text():
+    if not conversation_history:
+        return ""
+    
+    history_str = "\n--- Recent Conversation History (Most Recent Last) ---\n"
+    for turn in conversation_history:
+        history_str += f"User: {turn['user']}\n"
+        if turn['tools']:
+             history_str += f"Tools Used: {turn['tools']}\n"
+        history_str += f"Assistant: {turn['assistant']}\n"
+    history_str += "--- End of History ---\n"
+    return history_str
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global exit_stack
@@ -226,27 +242,25 @@ async def upload_google_token(request: Request):
 @app.get("/api/models")
 async def get_models():
     """Fetches available models from Ollama + Cloud Options."""
-    models = []
-    
-    # 1. Cloud Models (Hardcoded)
-    models.extend([
+    cloud_models = [
         "gpt-4o", "gpt-4-turbo", 
         "claude-3-5-sonnet", 
         "gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"
-    ])
+    ]
+    
+    local_models = []
     
     # 2. Local Models (Ollama)
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
             if response.status_code == 200:
-                ollama_models = [m["name"] for m in response.json().get("models", [])]
-                models.extend(ollama_models)
+                local_models = [m["name"] for m in response.json().get("models", [])]
     except Exception as e:
         print(f"Error fetching models: {e}")
-        models.extend(["mistral", "llama3"]) # Fallback if Ollama down
+        local_models = ["mistral", "llama3"] # Fallback if Ollama down
         
-    return {"models": models}
+    return {"local": local_models, "cloud": cloud_models}
 
 @app.get("/api/config")
 async def get_config():
@@ -281,6 +295,22 @@ async def get_file(path: str):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
 
+@app.delete("/api/history/recent")
+async def clear_recent_history():
+    """Clears the short-term in-memory session history."""
+    conversation_history.clear()
+    return {"status": "success", "message": "Recent session history cleared."}
+
+@app.delete("/api/history/all")
+async def clear_all_history():
+    """Clears BOTH short-term session history AND long-term ChromaDB memory."""
+    conversation_history.clear()
+    if memory_store:
+        success = memory_store.clear_memory()
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to clear long-term memory.")
+    return {"status": "success", "message": "All history (Recent + Long-term) cleared."}
+
 # --- Chat Logic ---
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
@@ -298,43 +328,94 @@ async def chat(request: ChatRequest):
     # 2. System Prompt
     tools_json = str([{'name': t.name, 'description': t.description, 'schema': t.inputSchema} for t in all_tools])
     
-    system_prompt_text = (
-        "You are a helpful assistant with access to multiple tools.\n"
-        f"Available Tools:\n{tools_json}\n\n"
-        "Routing Rules:\n"
-        "- IMPORTANT: If user asks for 'all', 'every', or 'everything', set 'limit' to 100. Default limit is 5 if not specified.\n"
-        "- If user asks for emails, use 'list_emails'. Extract 'limit'.\n"
-        "- If user searches emails, use 'list_emails' with 'query' (e.g. 'from:John', 'is:unread', 'is:important').\n"
-        "- If user asks to *summarize* multiple emails, use 'get_recent_emails_content'. extract 'limit' AND 'query'. e.g. 'summarize last 5 important emails' -> limit=5, query='is:important'.\n"
-        "- If user asks to read an email, use 'read_email'.\n"
-        "- If user asks for Drive files, use 'list_files'. Extract 'limit'.\n"
-        "- If user searches Drive, use 'list_files' with 'query'. Syntax: \"name contains 'foo'\", \"mimeType = 'application/pdf'\".\n"
-        "- If user asks for Calendar events, use 'list_upcoming_events'. Extract 'limit'.\n"
-        "- If user asks for time, use 'get_current_time'.\n"
-        "- If user searches local files, use 'list_local_files'.\n"
-        "- If user asks to read a local file, use 'read_local_file'.\n"
-        "- If user asks to JUST open a file, use 'open_file'.\n"
-        "- If user asks to locate a file, use 'locate_file'.\n"
-        "- If user asks to create a calendar event/meeting, use 'create_event'.\n"
-        "- If user asks to create a Drive file/folder/doc, use 'create_file'. MimeTypes: Folder='application/vnd.google-apps.folder', Doc='application/vnd.google-apps.document', Sheet='application/vnd.google-apps.spreadsheet'.\n"
-        "- If user asks to read or summarize a *Drive* file, use 'read_file_content'.\n"
-        "- If user asks to search the web/internet, finds info, or research, use 'search_web'. Extract the FULL query topic (e.g. 'search recent space news' -> query='recent space news').\n"
-        "- If user asks to visit a website/link or read a webpage, use 'visit_page'.\n\n"
-        "STRATEGY - MULTI-STEP REASONING:\n"
-        "1. You can call tools multiple times. e.g. List files -> Find target ID -> Read content -> Create Summary Doc.\n"
-        "2. If you need information from a previous step, DO NOT make it up. Use the Tool Output.\n"
-        "3. If a tool fails, explain why and try a different approach or ask the user.\n\n"
-        "RESPONSE FORMAT:\n"
-        "1. IF you need to use a tool: Respond ONLY with a JSON object: {\"tool\": \"tool_name\", \"arguments\": {...}}\n"
-        "2. IF you can answer directly: Respond with PLAIN TEXT.\n"
-        "3. **CRITICAL**: When providing links (to Docs, Files, Emails), ALWAYS format them as Markdown: `[Link Title](URL)`. Do NOT simply paste the URL.\n"
-        "4. **Email Sending Policy**: \n"
-        "   - **DRAFTING**: If user asks to send/draft, you MUST use `draft_email` first. Generate full content yourself. STOP after calling it.\n"
-        "   - **SENDING**: You may ONLY use `send_email` if the user input explicitly starts with \"Confirmed.\".\n"
-        "   - If you see \"Confirmed. Please immediately execute...\", you MUST call `send_email` immediately.\n"
-        "5. **STOPPING**: If you have completed the request (e.g. drafted the email, listed files), respond with a PLAIN TEXT summary. DO NOT call the same tool again.\n"
-        "6. **NO LOOPING**: If you have performed a search and got results, DO NOT call `search_web` again with the same query. Use the existing results.\n"
-    )
+    system_prompt_text = (f"""
+        You are a smart Personal Assistant Agent capable of managing emails, files, calendars, and web searches.
+
+        ### YOUR GOAL
+        Execute the user's intent by calling the correct tool with PRECISE parameters. If you have the data, summarize it clearly.
+
+        ### AVAILABLE TOOLS
+        {tools_json}
+
+        ### 1. CRITICAL RULES: PARAMETER EXTRACTION
+        **You must follow this logic tree for the 'limit' parameter:**
+        * **IF** user says "all", "every", "everything" -> Set `limit` to **100**.
+        * **IF** user specifies a number (e.g., "3 emails", "10 files") -> Set `limit` to that **EXACT NUMBER**.
+        * **IF** user implies a singular item (e.g., "the last email", "the file") -> Set `limit` to **1**.
+        * **ELSE** (no number specified) -> Set `limit` to **5** (Default).
+
+        ### 2. CRITICAL RULES: QUERY CONSTRUCTION
+        * **Filtering:** Never fetch "all" to filter manually. You MUST use the `query` parameter.
+            * "Important emails" -> `query="is:important"`
+            * "Unread emails" -> `query="is:unread"`
+            * "Sent emails" -> `query="is:sent"`
+            * "PDFs in Drive" -> `query="mimeType = 'application/pdf'"`
+        * **Web Search:** Extract only the core topic.
+            * "Search for news about AI" -> `query="news about AI"` (NOT "search for...")
+
+        ### 3. TOOL ROUTING GUIDE (Use this to choose the right tool)
+
+        **EMAIL:**
+        * User wants to see a *list* of headers/subjects? -> `list_emails`
+        * User wants to *summarize* or *read* multiple emails? -> `get_recent_emails_content`
+        * User wants to read a *specific* email (by ID)? -> `read_email` (DO NOT use 'get_email_content' - it does not exist)
+        * User wants to write/draft? -> `draft_email` (ALWAYS draft first. The tool will return the draft JSON. **STOP HERE**. Ask user to confirm. DO NOT call `send_email` in the same turn.)
+        * User says "Confirmed" or asks to SEND? -> `send_email` (IMMEDIATE ACTION. OUTPUT JSON ONLY. {{ "tool": "send_email", ... }}. DO NOT EXPLAIN.)
+
+        **DRIVE & FILES:**
+        * User wants to find/list files? -> `list_files`
+        * User wants to read/summarize a Drive file? -> `read_file_content`
+        * User wants to create a Doc/Sheet? -> `create_file`
+        * User wants to search *local* computer files? -> `list_local_files`
+        * User wants to read a *local* file? -> `read_local_file`
+
+        **CALENDAR & WEB:**
+        * User asks about schedule/meetings? -> `list_upcoming_events`
+        * User asks to set a meeting? -> `create_event`
+        * User asks for information, news, or facts? -> `search_web`
+        * User asks to read a specific URL? -> `visit_page`
+
+        ### 4. OPERATIONAL CONSTRAINTS
+        1.  **NO LOOPING (Within Request):** If you JUST called a tool (e.g., `list_emails`) for *this current request* and got results, do not call it again immediately. BUT, if this is a **NEW** user message or the user asks to "refresh" or "check again", you **MUST** call the tool again to get fresh data. Do NOT rely on old history for new requests.
+        2.  **FORMATTING:** When presenting lists or links, ALWAYS use Markdown: `[Title](URL)`.
+        3.  **DATA HANDLING:** If a tool returns a large JSON object, do not output the raw JSON. Summarize it (e.g., "I found 5 emails...").
+
+        ### EXAMPLES (Few-Shot Learning)
+
+        **User:** "Get me my last 3 important emails."
+        **Reasoning:** User specified count (3) and filter (important).
+        **Output:** {{ "tool": "list_emails", "arguments": {{ "limit": 3, "query": "is:important" }} }}
+
+        **User:** "Summarize the last 10 emails from John."
+        **Reasoning:** User wants content summary (not just list). Count is 10. Query is from:John.
+        **Output:** {{ "tool": "get_recent_emails_content", "arguments": {{ "limit": 10, "query": "from:John" }} }}
+
+        **User:** "Find all PDF files about 'Project X'."
+        **Reasoning:** User said "all" (limit=100). Filter is PDF and name contains 'Project X'.
+        **Output:** {{ "tool": "list_files", "arguments": {{ "limit": 100, "query": "name contains 'Project X' and mimeType = 'application/pdf'" }} }}
+
+        **User:** "Send an email to boss@company.com saying I will be late."
+        **Reasoning:** Writing request. Must draft first.
+        **Output:** {{ "tool": "draft_email", "arguments": {{ "to": "boss@company.com", "subject": "Update on arrival", "body": "Hi,\n\nI will be late today.\n\nBest,\n[Name]" }} }}
+
+        **User:** "Search for the latest iPhone rumors."
+        **Reasoning:** Informational query.
+        **Output:** {{ "tool": "search_web", "arguments": {{ "query": "latest iPhone rumors" }} }}
+
+        ### RESPONSE FORMAT
+        **CRITICAL INSTRUCTION**:
+        If you need to use a tool, you must return **ONLY** a valid JSON object.
+        **Do NOT** output any conversational text, reasoning, or markdown like "**Tool:**" before the JSON.
+        
+        **CORRECT FORMAT (JSON ONLY):**
+        {{ "tool": "tool_name", "arguments": {{ "key": "value" }} }}
+
+        **WRONG FORMAT (DO NOT USE):**
+        "To satisfy this request I will use..."
+        "**Tool:** list_emails"
+
+        If you have the information to answer, respond in PLAIN TEXT.
+    """)
 
     current_settings = load_settings()
     current_model = current_settings.get("model", "mistral")
@@ -422,10 +503,16 @@ async def chat(request: ChatRequest):
     if relevant_memories:
         memory_context = "\nRelevant Past Conversations:\n" + "\n".join(relevant_memories) + "\n"
 
-    current_context = f"{memory_context}User Request: {user_message}\n"
+    # 4. Inject Short-Term History
+    recent_history = get_recent_history_text()
+    
+    current_context = f"{recent_history}{memory_context}User Request: {user_message}\n"
     final_response = ""
     last_intent = "chat"
     last_data = None
+    
+    # Track tools used in this turn
+    tools_used_summary = []
     
     print(f"--- Starting ReAct Loop for: {user_message} ---")
     last_tool_signature = ""
@@ -474,9 +561,9 @@ async def chat(request: ChatRequest):
                 # Increment count
                 tool_repetition_counts[current_tool_signature] = tool_repetition_counts.get(current_tool_signature, 0) + 1
                 
-                if tool_repetition_counts[current_tool_signature] > 2: # Allow 1st call + 1 retry (total 2). 3rd call triggers guard.
-                    print(f"DEBUG: Loop detected (>2 calls). Identical tool call {tool_name}. Warning LLM.", file=sys.stderr)
-                    current_context += f"\nSystem: You are stuck in a loop calling '{tool_name}' with the same arguments. **STOP**. The results are already in the conversation history above. Scroll up and use them to answer the user.\n"
+                if tool_repetition_counts[current_tool_signature] > 1: # Strict: Block 2nd identical call.
+                    print(f"DEBUG: Loop detected (>1 call). Identical tool call {tool_name}. Warning LLM.", file=sys.stderr)
+                    current_context += f"\nSystem: You just called '{tool_name}' with these exact arguments and received results. **STOP**. Do not call it again. Summarize the results you already have.\n"
                     # Do NOT break. Give LLM a chance to recover.
                     continue
                 
@@ -504,9 +591,10 @@ async def chat(request: ChatRequest):
                             raw_output = f"Here is the content of the {len(emails)} emails found (Note: This might be fewer than requested). FAST AND CONCISELY Summarize them. EXPLICITLY mention that you found {len(emails)} emails matching the query:\n" + "\n".join(email_texts)
                         
                         # Set intent for frontend logic (e.g. if we list files, we want the UI to show them)
-                        if tool_name.startswith("list_") or tool_name.startswith("read_") or tool_name.startswith("create_") or tool_name == "draft_email" or tool_name == "send_email":
+                        if tool_name.startswith("list_") or tool_name.startswith("read_") or tool_name.startswith("create_") or tool_name == "draft_email" or tool_name == "send_email" or tool_name == "get_recent_emails_content":
                              last_intent = tool_name
                              if tool_name == "list_upcoming_events": last_intent = "list_events" # normalize
+                             if tool_name == "get_recent_emails_content": last_intent = "list_emails"
                              last_data = parsed
 
                         if tool_name == "search_web":
@@ -526,6 +614,8 @@ async def chat(request: ChatRequest):
                     print(f"DEBUG: Tool Output Length: {len(raw_output)}")
                     current_context += f"\nTool '{tool_name}' Output: {display_output}\n"
                     
+                    tools_used_summary.append(f"{tool_name}: {display_output[:500]}...")
+                    
                 except Exception as e:
                     current_context += f"\nSystem: Error executing tool {tool_name}: {str(e)}\n"
             
@@ -543,6 +633,14 @@ async def chat(request: ChatRequest):
     if memory_store and final_response:
         memory_store.add_memory("user", user_message)
         memory_store.add_memory("assistant", final_response)
+        
+    # Save to Short-Term History
+    conversation_history.append({
+        "user": user_message,
+        "assistant": final_response,
+        "tools": tools_used_summary
+    })
+    print(f"DEBUG: Conversation History Updated. Current Length: {len(conversation_history)}")
         
     return ChatResponse(
         response=final_response,

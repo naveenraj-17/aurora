@@ -9,8 +9,26 @@ def open_browser(url="http://localhost:3000"):
     print(f"Opening {url}...")
     
     # Browsers to try for "app" mode
+    # Browsers to try for "app" mode
     browsers = ["google-chrome", "chromium", "brave-browser", "msedge"]
-    if sys.platform == "darwin":
+    
+    # Check for WSL
+    is_wsl = False
+    if sys.platform == "linux":
+        try:
+            with open("/proc/version", "r") as f:
+                if "microsoft" in f.read().lower():
+                    is_wsl = True
+        except:
+            pass
+
+    if is_wsl:
+        browsers = [
+            "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
+            "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+            "/mnt/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+        ]
+    elif sys.platform == "darwin":
         browsers = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", 
                     "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
     elif sys.platform == "win32":
@@ -21,8 +39,8 @@ def open_browser(url="http://localhost:3000"):
         if shutil.which(b):
             browser_cmd = b
             break
-        # Check absolute paths for macOS
-        if sys.platform == "darwin" and os.path.exists(b):
+        # Check absolute paths (macOS, WSL, Linux custom paths)
+        if os.path.isabs(b) and os.path.exists(b):
             browser_cmd = b
             break
             

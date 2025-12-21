@@ -159,7 +159,7 @@ export default function Home() {
             <div className="flex items-center gap-3">
               <div className="h-3 w-3 bg-green-500 rounded-full animate-pulse shadow-[0_0_10px_#22c55e]"></div>
               <h1 className="text-sm font-bold tracking-widest uppercase text-zinc-300">
-                {agentName} <span className="text-zinc-600">//</span> <span className="text-zinc-500">v2.4.0</span>
+                {agentName} <span className="text-zinc-600">-</span> <span className="text-zinc-500">Ask Anything</span>
               </h1>
             </div>
             <div className="flex items-center">
@@ -168,12 +168,12 @@ export default function Home() {
                 <div className="flex items-center gap-2">
                   <span className="text-zinc-600">Mode:</span>
                   <span className={cn("font-bold", systemStatus?.mode === 'cloud' ? "text-blue-400" : "text-green-400")}>
-                    {systemStatus?.mode || 'LOCAL'}
+                    {systemStatus?.mode || 'Loading...'}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-zinc-600">Model:</span>
-                  <span className="text-zinc-300">{systemStatus?.model || 'MISTRAL'}</span>
+                  <span className="text-zinc-300">{systemStatus?.model || 'Loading...'}</span>
                 </div>
               </div>
 

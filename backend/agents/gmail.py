@@ -65,7 +65,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="draft_email",
-            description="Draft an email for review. Returns the draft content. Use this BEFORE sending.",
+            description="Draft an email for review. Returns the draft content. Use this BEFORE sending. This tool does NOT send the email.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -78,7 +78,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="send_email",
-            description="Send an email immediately. Use AFTER draft confirmation.",
+            description="Send an email immediately. Use ONLY AFTER user explicit confirmation of a draft.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -126,7 +126,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
                 full_email = get_message(m['id'])
                 if full_email:
                     results.append({
-                        "from": full_email.get('sender'),
+                        "id": m['id'],
+                        "sender": full_email.get('sender'),
                         "subject": full_email.get('subject'),
                         "date": full_email.get('date'),
                         "body": full_email.get('body', '')[:1000] # Truncate body to save tokens
@@ -147,6 +148,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
 
         elif name == "draft_email":
             # Just echo back the arguments so the frontend can display them
+            # Return a system instruction to stop.
+            arguments["system_instruction"] = "DRAFT CREATED. DO NOT SEND YET. ASK USER FOR CONFIRMATION."
             return [types.TextContent(type="text", text=json.dumps(arguments))]
 
         elif name == "send_email":
