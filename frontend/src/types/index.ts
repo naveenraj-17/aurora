@@ -42,10 +42,9 @@ export interface Message {
 }
 
 export interface SystemStatus {
-    agents: {
-        [key: string]: string;
-    };
-    overall: string;
+    agents: Record<string, { status: string; name: string }>;
+    overall: 'operational' | 'degraded' | 'down';
     model: string;
-    mode: string;
+    mode: 'local' | 'cloud';
+    active_agent_id?: string;
 }

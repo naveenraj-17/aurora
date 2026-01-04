@@ -31,21 +31,6 @@ Aurora uses the Model Context Protocol to connect with various services:
 -   Real-time streaming responses.
 -   "App Mode" support for a native-like experience.
 
-### ⚙️ Configuration
-
-![Aurora Settings](demo/settings.png)
-
-Aurora offers a flexible configuration menu to tailor the agent to your needs:
-
-| Option | Description |
-| :--- | :--- |
-| **Agent Name** | Custom name for your assistant (e.g., "Jarvis", "Aurora"). |
-| **Model** | Choose the underlying LLM. Supports local models (e.g., `mistral-nemo`, `llama3`) via Ollama or cloud models. |
-| **Mode** | Switch between **Local** (runs on your machine via Ollama) or **Cloud** (uses OpenAI/Anthropic/Gemini APIs). |
-| **API Keys** | Enter keys for OpenAI, Anthropic, or Gemini if using Cloud mode. |
-| **Show Browser** | (Experimental) Toggle whether the automated browser window is visible during tasks. |
-| **Google Services** | One-click button to authenticate and connect your Google account for Gmail, Drive, and Calendar integration. |
-
 ---
 
 ## 🤖 Available Agents
@@ -72,6 +57,23 @@ Aurora orchestrates multiple specialized agents to handle different tasks:
 ### 🌐 Browser Agent
 - **Web Search**: Perform Google searches to answer questions.
 - **Page Visit**: (Experimental) Visit and extract content from specific URLs.
+
+---
+
+### ⚙️ Configuration
+
+![Aurora Settings](demo/settings.png)
+
+Aurora offers a flexible configuration menu to tailor the agent to your needs:
+
+| Option | Description |
+| :--- | :--- |
+| **Agent Name** | Custom name for your assistant (e.g., "Jarvis", "Aurora"). |
+| **Model** | Choose the underlying LLM. Supports local models (e.g., `mistral-nemo`, `llama3`) via Ollama or cloud models. |
+| **Mode** | Switch between **Local** (runs on your machine via Ollama) or **Cloud** (uses OpenAI/Anthropic/Gemini APIs). |
+| **API Keys** | Enter keys for OpenAI, Anthropic, or Gemini if using Cloud mode. |
+| **Show Browser** | (Experimental) Toggle whether the automated browser window is visible during tasks. |
+| **Google Services** | One-click button to authenticate and connect your Google account for Gmail, Drive, and Calendar integration. |
 
 ---
 

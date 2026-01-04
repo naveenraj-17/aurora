@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, ChevronRight, Settings, Terminal } from 'lucide-react';
+import { Send, Bot, User, ChevronRight, Settings, Terminal, Sun, Moon } from 'lucide-react';
 
 import { SettingsModal } from '@/components/SettingsModal';
 import { AuthPrompt } from '@/components/AuthPrompt';
@@ -26,6 +26,7 @@ export default function Home() {
   const [showBrowser, setShowBrowser] = useState(false);
   const [credentials, setCredentials] = useState(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -35,6 +36,11 @@ export default function Home() {
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  // Helper to refresh status
+  const refreshSystemStatus = () => {
+    fetch('/api/status').then(r => r.json()).then(d => setSystemStatus(d)).catch(console.error);
+  };
 
   // Initial Data Fetch
   useEffect(() => {
@@ -46,7 +52,7 @@ export default function Home() {
     // 2. Get Credentials (masked)
     fetch('/api/config').then(r => r.json()).then(d => setCredentials(d)).catch(console.error);
     // 3. Get Status
-    fetch('/api/status').then(r => r.json()).then(d => setSystemStatus(d)).catch(console.error);
+    refreshSystemStatus();
   }, []);
 
   // State to track if a draft has been sent
@@ -57,10 +63,33 @@ export default function Home() {
     let command = `Confirmed. Please immediately execute the send_email tool. To: "${to}", Subject: "${subject}", Body: "${body}"`;
     if (cc) command += `, Cc: "${cc}"`;
     if (bcc) command += `, Bcc: "${bcc}"`;
-    command += `.`;
 
-    setMessages(prev => [...prev, { role: 'user', content: `Send email to ${to}...` }]);
+    // Send directly
     processMessage(command);
+  };
+
+  const handleSwitchAgent = async (agentId: string) => {
+    try {
+      const res = await fetch('/api/agents/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: agentId })
+      });
+      if (res.ok) {
+        // Refresh status immediately
+        const statusRes = await fetch('/api/status');
+        const statusData = await statusRes.json();
+        setSystemStatus(statusData);
+        if (statusData.agents[agentId]) {
+          setAgentName(statusData.agents[agentId].name);
+        }
+
+        // Optional: Add a system message saying "Switched to X"
+        setMessages(prev => [...prev, { role: 'assistant', content: `System: Switched active agent to ${statusData.agents[agentId]?.name || agentId}. Ready.` }]);
+      }
+    } catch (e) {
+      console.error("Failed to switch agent", e);
+    }
   };
 
   const handleUpdateSettings = async (name: string, model: string, mode: string, keys: any) => {
@@ -141,11 +170,15 @@ export default function Home() {
   };
 
   return (
-    <main className="flex h-screen bg-black text-white font-mono overflow-hidden">
+    <main className={cn("flex h-screen bg-black text-white font-mono overflow-hidden", theme === 'light' ? 'light-mode' : '')}>
+      {/* Settings Modal */}
       {/* Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={() => {
+          setIsSettingsOpen(false);
+          refreshSystemStatus();
+        }}
         onSave={handleUpdateSettings}
         credentials={credentials}
         showBrowser={showBrowser}
@@ -179,24 +212,48 @@ export default function Home() {
 
               {/* Status Indicators */}
               {/* Agents Hover Status */}
-              <div className="group relative flex items-center gap-2 cursor-help border-r border-zinc-800 pl-4 pr-4">
-                <span className="text-[10px] font-bold text-zinc-500 tracking-widest uppercase hover:text-zinc-300 transition-colors">AGENTS</span>
+              <div className="group relative flex items-center gap-2 cursor-pointer border-r border-zinc-800 pl-4 pr-4 hover:bg-zinc-900 transition-colors">
+                <span className="text-[10px] font-bold text-zinc-500 tracking-widest uppercase group-hover:text-zinc-300 transition-colors">AGENTS</span>
 
                 {/* Dropdown on Hover */}
-                <div className="absolute right-0 top-full mt-4 w-48 bg-zinc-950 border border-zinc-800 p-3 shadow-2xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all pointer-events-none group-hover:pointer-events-auto z-50">
-                  <div className="space-y-3">
-                    {systemStatus?.agents && Object.entries(systemStatus.agents).map(([agent, status]) => (
-                      <div key={agent} className="flex items-center justify-between text-[10px] uppercase tracking-wider text-zinc-400">
-                        <span>{agent.replace('_agent', '').replace('_', ' ')}</span>
-                        <div className={cn("h-1.5 w-1.5 rounded-full", status === 'online' ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : "bg-zinc-800")}></div>
-                      </div>
-                    ))}
+                <div className="absolute right-0 top-full mt-0 w-64 bg-zinc-950 border border-zinc-800 p-2 shadow-2xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all pointer-events-none group-hover:pointer-events-auto z-50">
+                  <div className="space-y-1">
+                    {systemStatus?.agents && Object.entries(systemStatus.agents).map(([id, info]) => {
+                      const isActive = systemStatus.active_agent_id === id;
+                      // Handle legacy string vs new object structure if backend update lags (safety)
+                      const name = typeof info === 'string' ? id : info.name;
+                      const status = typeof info === 'string' ? info : info.status;
+
+                      return (
+                        <button
+                          key={id}
+                          onClick={() => handleSwitchAgent(id)}
+                          className={cn(
+                            "nav-button w-full flex items-center justify-between px-3 py-2 text-[10px] uppercase tracking-wider text-left border border-transparent hover:border-zinc-700 transition-all",
+                            isActive ? "bg-zinc-900 text-white border-zinc-800" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50"
+                          )}>
+                          <div className="flex items-center gap-2">
+                            <div className={cn("h-1.5 w-1.5 rounded-full", status === 'online' ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : "bg-red-500")}></div>
+                            <span className="truncate max-w-[120px]">{name}</span>
+                          </div>
+                          {isActive && <div className="h-1.5 w-1.5 bg-white rounded-full animate-pulse"></div>}
+                        </button>
+                      );
+                    })}
                     {(!systemStatus?.agents || Object.keys(systemStatus.agents).length === 0) && (
-                      <div className="text-[10px] text-zinc-600 italic">No agents detected.</div>
+                      <div className="text-[10px] text-zinc-600 italic px-3 py-2">No agents detected.</div>
                     )}
                   </div>
                 </div>
               </div>
+
+              <button
+                onClick={() => setTheme(prev => prev === 'dark' ? 'light' : 'dark')}
+                className="p-2 ml-2 hover:bg-zinc-900 rounded text-zinc-400 hover:text-white transition-colors"
+                title={theme === 'dark' ? "Switch to Light Mode" : "Switch to Dark Mode"}
+              >
+                {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
 
               <button
                 onClick={() => setIsSettingsOpen(true)}

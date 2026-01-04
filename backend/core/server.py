@@ -11,6 +11,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import httpx
 from services.google import get_auth_url, finish_auth
+from services.synthetic_data import generate_synthetic_data, SyntheticDataRequest, current_job, DATASETS_DIR
+from datetime import datetime
 try:
     from core.memory import MemoryStore
 except ImportError:
@@ -51,18 +53,37 @@ memory_store = None
 from collections import deque
 conversation_history = deque(maxlen=10) # Keep last 10 turns
 
-def get_recent_history_text():
-    if not conversation_history:
-        return ""
-    
-    history_str = "\n--- Recent Conversation History (Most Recent Last) ---\n"
+# System Prompt for Native Tool Calling (Simple & Direct)
+NATIVE_TOOL_SYSTEM_PROMPT = """You are a smart Personal Assistant Agent.
+Your goal is to HELP the user by calling the appropriate tools when needed.
+
+### CRITICAL RULES: ID USAGE
+* **NEVER guess or hallucinate IDs** (e.g. "email_123", "file_abc").
+* **ALWAYS call list tools first** (like `list_emails`, `list_files`) to find real IDs.
+* **THEN** call read/get tools with the *exact* ID found.
+
+### CRITICAL RULES: PARAMETER EXTRACTION
+* **limit**: 
+    - "all", "every" -> 100
+    - "3 emails" -> 3
+    - "the last email" -> 1
+    - Default -> 5
+* **query**:
+    - "Important" -> "is:important"
+    - "Unread" -> "is:unread"
+    - "Sent" -> "is:sent"
+"""
+
+def get_recent_history_messages():
+    """Returns a list of message dicts for the chat API."""
+    messages = []
     for turn in conversation_history:
-        history_str += f"User: {turn['user']}\n"
-        if turn['tools']:
-             history_str += f"Tools Used: {turn['tools']}\n"
-        history_str += f"Assistant: {turn['assistant']}\n"
-    history_str += "--- End of History ---\n"
-    return history_str
+        messages.append({"role": "user", "content": turn['user']})
+        # If tools were used, we should ideally represent them, but for now 
+        # let's represent the final assistant response to keep context usage expected.
+        # Future improvement: Store full turn history including tool_calls and tool_outputs.
+        messages.append({"role": "assistant", "content": turn['assistant']})
+    return messages
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -154,6 +175,50 @@ from core.config import load_settings, SETTINGS_FILE
 
 CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "credentials.json")
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "token.json")
+USER_AGENTS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "user_agents.json")
+
+# --- Agent Management Logic ---
+class Agent(BaseModel):
+    id: str
+    name: str
+    description: str
+    avatar: str = "default"
+    tools: list[str] # ["all"] or ["gmail", "search_web"]
+    system_prompt: str
+
+class AgentActiveRequest(BaseModel):
+    agent_id: str
+
+active_agent_id = "aurora" # Default
+
+def load_user_agents() -> list[dict]:
+    if not os.path.exists(USER_AGENTS_FILE):
+        return []
+    try:
+        with open(USER_AGENTS_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_user_agents(agents: list[dict]):
+    with open(USER_AGENTS_FILE, 'w') as f:
+        json.dump(agents, f, indent=4)
+
+def get_active_agent_data():
+    agents = load_user_agents()
+    for a in agents:
+        if a["id"] == active_agent_id:
+            return a
+    # Fallback to first or hardcoded default if file empty
+    if agents:
+        return agents[0]
+    return {
+        "id": "aurora",
+        "name": "Aurora",
+        "system_prompt": NATIVE_TOOL_SYSTEM_PROMPT, # Fallback
+        "tools": ["all"]
+    }
+
 
 class Settings(BaseModel):
     agent_name: str
@@ -170,14 +235,18 @@ def save_settings(settings: dict):
 
 @app.get("/api/status")
 async def get_status():
-    # In a real system, we'd ping each agent. For now, check if they are in the AGENTS dict
+    # Helper to list agents from JSON
+    user_agents = load_user_agents()
     agents_status = {}
-    for name in AGENTS.keys():
-        agents_status[name] = "online"
+    for a in user_agents:
+        # For now, all loaded agents are "online" effectively
+        agents_status[a["id"]] = {"name": a["name"], "status": "online"}
     
     current_settings = load_settings()
+    
     return {
         "agents": agents_status, 
+        "active_agent_id": active_agent_id,
         "overall": "operational", 
         "model": current_settings.get("model", "mistral"),
         "mode": current_settings.get("mode", "local")
@@ -239,7 +308,84 @@ async def upload_google_token(request: Request):
         print(f"Error saving token: {e}")
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
 
-@app.get("/api/models")
+
+
+# --- Agent Endpoints ---
+@app.get("/api/agents")
+async def get_agents():
+    return load_user_agents()
+
+@app.post("/api/agents")
+async def create_agent(agent: Agent):
+    agents = load_user_agents()
+    # Check if exists
+    for i, a in enumerate(agents):
+        if a["id"] == agent.id:
+            agents[i] = agent.dict() # Update
+            save_user_agents(agents)
+            return agent
+    
+    agents.append(agent.dict())
+    save_user_agents(agents)
+    return agent
+
+@app.delete("/api/agents/{agent_id}")
+async def delete_agent(agent_id: str):
+    if agent_id == "aurora":
+         raise HTTPException(status_code=400, detail="Cannot delete default agent.")
+    agents = load_user_agents()
+    agents = [a for a in agents if a["id"] != agent_id]
+    save_user_agents(agents)
+    return {"status": "success"}
+
+@app.get("/api/agents/active")
+async def get_active_agent_endpoint():
+    return {"active_agent_id": active_agent_id}
+
+@app.post("/api/agents/active")
+async def set_active_agent_endpoint(req: AgentActiveRequest):
+    global active_agent_id
+    # Validate
+    agents = load_user_agents()
+    ids = [a["id"] for a in agents]
+    if req.agent_id not in ids:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    
+    active_agent_id = req.agent_id
+    print(f"Active Agent switched to: {active_agent_id}")
+    return {"status": "success", "active_agent_id": active_agent_id}
+
+# --- Synthetic Data Endpoints ---
+@app.post("/api/synthetic/generate")
+async def start_synthetic_generation(req: SyntheticDataRequest):
+    if current_job["status"] == "generating":
+        raise HTTPException(status_code=400, detail="A generation job is already running.")
+    
+    # Run in background
+    asyncio.create_task(generate_synthetic_data(req))
+    return {"status": "started", "message": "Generation started in background."}
+
+@app.get("/api/synthetic/status")
+async def get_synthetic_status():
+    return current_job
+
+@app.get("/api/synthetic/datasets")
+async def list_datasets():
+    if not os.path.exists(DATASETS_DIR):
+        return []
+    files = [f for f in os.listdir(DATASETS_DIR) if f.endswith(".jsonl")]
+    # Return list of {filename, size, date}
+    results = []
+    for f in files:
+        path = os.path.join(DATASETS_DIR, f)
+        stats = os.stat(path)
+        results.append({
+            "filename": f,
+            "size": stats.st_size,
+            "created": datetime.fromtimestamp(stats.st_ctime).isoformat()
+        })
+    return sorted(results, key=lambda x: x["created"], reverse=True)
+
 async def get_models():
     """Fetches available models from Ollama + Cloud Options."""
     cloud_models = [
@@ -321,101 +467,34 @@ async def chat(request: ChatRequest):
     
     # 1. Aggregate Tools
     all_tools = []
+    
+    # -- Load Active Agent Logic --
+    active_agent = get_active_agent_data()
+    allowed_tools = active_agent.get("tools", ["all"])
+    agent_system_template = active_agent.get("system_prompt", NATIVE_TOOL_SYSTEM_PROMPT)
+    
+    print(f"DEBUG: Using Agent '{active_agent.get('name')}' with tools: {allowed_tools}")
+
     for session in agent_sessions.values():
         result = await session.list_tools()
-        all_tools.extend(result.tools)
+        # Filter Logic
+        if "all" in allowed_tools:
+            all_tools.extend(result.tools)
+        else:
+            for t in result.tools:
+                if t.name in allowed_tools:
+                    all_tools.extend([t])
     
     # 2. System Prompt
+    # Prepare tools for Ollama Native API (List of dicts)
+    ollama_tools = [{'type': 'function', 'function': {'name': t.name, 'description': t.description, 'parameters': t.inputSchema}} for t in all_tools]
+    
+    # Keep the string version for Cloud models (System Prompt injection)
     tools_json = str([{'name': t.name, 'description': t.description, 'schema': t.inputSchema} for t in all_tools])
     
-    system_prompt_text = (f"""
-        You are a smart Personal Assistant Agent capable of managing emails, files, calendars, and web searches.
+    # Inject tools into the template
+    system_prompt_text = agent_system_template.replace("{tools_json}", tools_json)
 
-        ### YOUR GOAL
-        Execute the user's intent by calling the correct tool with PRECISE parameters. If you have the data, summarize it clearly.
-
-        ### AVAILABLE TOOLS
-        {tools_json}
-
-        ### 1. CRITICAL RULES: PARAMETER EXTRACTION
-        **You must follow this logic tree for the 'limit' parameter:**
-        * **IF** user says "all", "every", "everything" -> Set `limit` to **100**.
-        * **IF** user specifies a number (e.g., "3 emails", "10 files") -> Set `limit` to that **EXACT NUMBER**.
-        * **IF** user implies a singular item (e.g., "the last email", "the file") -> Set `limit` to **1**.
-        * **ELSE** (no number specified) -> Set `limit` to **5** (Default).
-
-        ### 2. CRITICAL RULES: QUERY CONSTRUCTION
-        * **Filtering:** Never fetch "all" to filter manually. You MUST use the `query` parameter.
-            * "Important emails" -> `query="is:important"`
-            * "Unread emails" -> `query="is:unread"`
-            * "Sent emails" -> `query="is:sent"`
-            * "PDFs in Drive" -> `query="mimeType = 'application/pdf'"`
-        * **Web Search:** Extract only the core topic.
-            * "Search for news about AI" -> `query="news about AI"` (NOT "search for...")
-
-        ### 3. TOOL ROUTING GUIDE (Use this to choose the right tool)
-
-        **EMAIL:**
-        * User wants to see a *list* of headers/subjects? -> `list_emails`
-        * User wants to *summarize* or *read* multiple emails? -> `get_recent_emails_content`
-        * User wants to read a *specific* email (by ID)? -> `read_email` (DO NOT use 'get_email_content' - it does not exist)
-        * User wants to write/draft? -> `draft_email` (ALWAYS draft first. The tool will return the draft JSON. **STOP HERE**. Ask user to confirm. DO NOT call `send_email` in the same turn.)
-        * User says "Confirmed" or asks to SEND? -> `send_email` (IMMEDIATE ACTION. OUTPUT JSON ONLY. {{ "tool": "send_email", ... }}. DO NOT EXPLAIN.)
-
-        **DRIVE & FILES:**
-        * User wants to find/list files? -> `list_files`
-        * User wants to read/summarize a Drive file? -> `read_file_content`
-        * User wants to create a Doc/Sheet? -> `create_file`
-        * User wants to search *local* computer files? -> `list_local_files`
-        * User wants to read a *local* file? -> `read_local_file`
-
-        **CALENDAR & WEB:**
-        * User asks about schedule/meetings? -> `list_upcoming_events`
-        * User asks to set a meeting? -> `create_event`
-        * User asks for information, news, or facts? -> `search_web`
-        * User asks to read a specific URL? -> `visit_page`
-
-        ### 4. OPERATIONAL CONSTRAINTS
-        1.  **NO LOOPING (Within Request):** If you JUST called a tool (e.g., `list_emails`) for *this current request* and got results, do not call it again immediately. BUT, if this is a **NEW** user message or the user asks to "refresh" or "check again", you **MUST** call the tool again to get fresh data. Do NOT rely on old history for new requests.
-        2.  **FORMATTING:** When presenting lists or links, ALWAYS use Markdown: `[Title](URL)`.
-        3.  **DATA HANDLING:** If a tool returns a large JSON object, do not output the raw JSON. Summarize it (e.g., "I found 5 emails...").
-
-        ### EXAMPLES (Few-Shot Learning)
-
-        **User:** "Get me my last 3 important emails."
-        **Reasoning:** User specified count (3) and filter (important).
-        **Output:** {{ "tool": "list_emails", "arguments": {{ "limit": 3, "query": "is:important" }} }}
-
-        **User:** "Summarize the last 10 emails from John."
-        **Reasoning:** User wants content summary (not just list). Count is 10. Query is from:John.
-        **Output:** {{ "tool": "get_recent_emails_content", "arguments": {{ "limit": 10, "query": "from:John" }} }}
-
-        **User:** "Find all PDF files about 'Project X'."
-        **Reasoning:** User said "all" (limit=100). Filter is PDF and name contains 'Project X'.
-        **Output:** {{ "tool": "list_files", "arguments": {{ "limit": 100, "query": "name contains 'Project X' and mimeType = 'application/pdf'" }} }}
-
-        **User:** "Send an email to boss@company.com saying I will be late."
-        **Reasoning:** Writing request. Must draft first.
-        **Output:** {{ "tool": "draft_email", "arguments": {{ "to": "boss@company.com", "subject": "Update on arrival", "body": "Hi,\n\nI will be late today.\n\nBest,\n[Name]" }} }}
-
-        **User:** "Search for the latest iPhone rumors."
-        **Reasoning:** Informational query.
-        **Output:** {{ "tool": "search_web", "arguments": {{ "query": "latest iPhone rumors" }} }}
-
-        ### RESPONSE FORMAT
-        **CRITICAL INSTRUCTION**:
-        If you need to use a tool, you must return **ONLY** a valid JSON object.
-        **Do NOT** output any conversational text, reasoning, or markdown like "**Tool:**" before the JSON.
-        
-        **CORRECT FORMAT (JSON ONLY):**
-        {{ "tool": "tool_name", "arguments": {{ "key": "value" }} }}
-
-        **WRONG FORMAT (DO NOT USE):**
-        "To satisfy this request I will use..."
-        "**Tool:** list_emails"
-
-        If you have the information to answer, respond in PLAIN TEXT.
-    """)
 
     current_settings = load_settings()
     current_model = current_settings.get("model", "mistral")
@@ -456,7 +535,7 @@ async def chat(request: ChatRequest):
             resp.raise_for_status()
             return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
-    async def generate_response(prompt_msg, sys_prompt):
+    async def generate_response(prompt_msg, sys_prompt, tools=None, history_messages=None):
         if mode == "cloud":
             try:
                 # Construct messages list for cloud providers that support it
@@ -476,6 +555,49 @@ async def chat(request: ChatRequest):
         # Local Ollama
         async with httpx.AsyncClient() as client:
             try:
+                # Try specific Ollama Tool Call format if tools are provided
+                if tools:
+                    print(f"DEBUG: Calling Ollama /api/chat with tools...", flush=True)
+                    
+                    # Construct full message history
+                    # 1. System Prompt
+                    messages = [{"role": "system", "content": sys_prompt}]
+                    
+                    # 2. History (if available)
+                    if history_messages:
+                        messages.extend(history_messages)
+                        
+                    # 3. Current User Message
+                    messages.append({"role": "user", "content": prompt_msg})
+
+                    response = await client.post(
+                        f"{OLLAMA_BASE_URL}/api/chat",
+                        json={
+                            "model": current_model,
+                            "messages": messages,
+                            "tools": tools,
+                            "stream": False
+                        },
+                        timeout=None
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    msg = data.get("message", {})
+                    
+                    # Check for native tool calls
+                    if "tool_calls" in msg and msg["tool_calls"]:
+                        # Convert Ollama native tool call to our internal JSON format
+                        tc = msg["tool_calls"][0]
+                        print(f"DEBUG: Native Tool Call received: {tc['function']['name']}", flush=True)
+                        return json.dumps({
+                            "tool": tc["function"]["name"], 
+                            "arguments": tc["function"]["arguments"]
+                        })
+                    
+                    return msg.get("content", "")
+
+                # Fallback to generate if no tools or tools failed (Old behavior)
+                print(f"DEBUG: Calling Ollama /api/generate (Legacy Mode)...", flush=True)
                 response = await client.post(
                     f"{OLLAMA_BASE_URL}/api/generate",
                     json={
@@ -504,9 +626,19 @@ async def chat(request: ChatRequest):
         memory_context = "\nRelevant Past Conversations:\n" + "\n".join(relevant_memories) + "\n"
 
     # 4. Inject Short-Term History
-    recent_history = get_recent_history_text()
+    # 4. Inject Short-Term History
+    recent_history_messages = get_recent_history_messages()
     
-    current_context = f"{recent_history}{memory_context}User Request: {user_message}\n"
+    # Context for LLM (Text-based Fallback for non-native logic or logging)
+    # We still keep a text version for "current_context" used in loop logic if needed, 
+    # but the API call will use the structured messages.
+    
+    # current_context is mainly strictly for the 'legacy/text' based prompt construction if we fell back,
+    # OR for the internal logic loop to append tool outputs.
+    # For the INITIAL prompt, we use the user_message.
+    
+    current_context_text = f"User Request: {user_message}\n" 
+    
     final_response = ""
     last_intent = "chat"
     last_data = None
@@ -518,12 +650,39 @@ async def chat(request: ChatRequest):
     last_tool_signature = ""
     tool_repetition_counts = {}
 
+    tool_repetition_counts = {}
+
     async with httpx.AsyncClient() as client:
         for turn in range(MAX_TURNS):
             print(f"Turn {turn + 1}/{MAX_TURNS}")
             
+            # Determine Prompt logic
+            # If it's the first turn, we use the clean Native System Prompt & History
+            if turn == 0:
+                 active_sys_prompt = system_prompt_text
+                 # We simply pass the user message. The 'generate_response' will prepend history.
+                 active_prompt = user_message 
+                 active_history = recent_history_messages
+            else:
+                 # Successive turns in the ReAct loop (Tool outputs)
+                 # We must append the tool output to the message chain effectively.
+                 # For simplicity in this hybrid setup, we'll append to the 'user' prompt side 
+                 # because constructing a valid multi-turn tool-call history for Ollama manually is complex 
+                 # without storing the specific tool_call_id etc.
+                 
+                 # Using the 'Legacy' text-injection style for immediate tool feedback works robustly 
+                 # because the model sees "Tool Output: ..." as user text context.
+                 active_sys_prompt = system_prompt_text # Keep it simple
+                 active_prompt = current_context_text # Contains accumulated tool outputs
+                 active_history = [] # Don't duplicate history in the context frame repeatedly if we are just continuing the thought
+            
             # Ask LLM
-            llm_output = await generate_response(current_context, system_prompt_text)
+            llm_output = await generate_response(
+                active_prompt, 
+                active_sys_prompt, 
+                tools=ollama_tools, 
+                history_messages=active_history
+            )
             print(f"DEBUG: LLM Output: {llm_output[:100]}...") # Log first 100 chars
             
             # Parse Tool Call
@@ -533,9 +692,15 @@ async def chat(request: ChatRequest):
             
             try:
                 cleaned_output = llm_output.replace("```json", "").replace("```", "").strip()
-                json_match = re.search(r'\{.*\}', cleaned_output, re.DOTALL)
-                if json_match:
-                    tool_call = json.loads(json_match.group(0))
+                
+                # 1. Try direct JSON parsing (Native tool call returns pure JSON)
+                try:
+                    tool_call = json.loads(cleaned_output)
+                except:
+                    # 2. Try Regex Extraction (Manual ReAct fallback)
+                    json_match = re.search(r'\{.*\}', cleaned_output, re.DOTALL)
+                    if json_match:
+                        tool_call = json.loads(json_match.group(0))
             except Exception as e:
                 json_error = str(e)
 
@@ -552,7 +717,7 @@ async def chat(request: ChatRequest):
                 
                 if tool_name not in tool_router:
                      # Hallucinated tool, append error and continue
-                     current_context += f"\nSystem: Error - Tool '{tool_name}' not found. Please try a valid tool.\n"
+                     current_context_text += f"\nSystem: Error - Tool '{tool_name}' not found. Please try a valid tool.\n"
                      continue
 
                 # Loop Guard with Repetition Tolerance
@@ -563,7 +728,7 @@ async def chat(request: ChatRequest):
                 
                 if tool_repetition_counts[current_tool_signature] > 1: # Strict: Block 2nd identical call.
                     print(f"DEBUG: Loop detected (>1 call). Identical tool call {tool_name}. Warning LLM.", file=sys.stderr)
-                    current_context += f"\nSystem: You just called '{tool_name}' with these exact arguments and received results. **STOP**. Do not call it again. Summarize the results you already have.\n"
+                    current_context_text += f"\nSystem: You just called '{tool_name}' with these exact arguments and received results. **STOP**. Do not call it again. Summarize the results you already have.\n"
                     # Do NOT break. Give LLM a chance to recover.
                     continue
                 
@@ -612,12 +777,12 @@ async def chat(request: ChatRequest):
                     # Increase truncation limit to 50k to allow full email contents to be passed to next steps
                     display_output = raw_output[:50000] + "...(truncated)" if len(raw_output) > 50000 else raw_output
                     print(f"DEBUG: Tool Output Length: {len(raw_output)}")
-                    current_context += f"\nTool '{tool_name}' Output: {display_output}\n"
+                    current_context_text += f"\nTool '{tool_name}' Output: {display_output}\n"
                     
                     tools_used_summary.append(f"{tool_name}: {display_output[:500]}...")
                     
                 except Exception as e:
-                    current_context += f"\nSystem: Error executing tool {tool_name}: {str(e)}\n"
+                    current_context_text += f"\nSystem: Error executing tool {tool_name}: {str(e)}\n"
             
             else:
                 # No tool call, this is the final answer
