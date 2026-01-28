@@ -178,6 +178,45 @@ from core.config import load_settings, SETTINGS_FILE
 CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "credentials.json")
 TOKEN_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "token.json")
 USER_AGENTS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "user_agents.json")
+CUSTOM_TOOLS_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "custom_tools.json")
+
+# --- Custom Tools Management ---
+def load_custom_tools():
+    if not os.path.exists(CUSTOM_TOOLS_FILE):
+        return []
+    try:
+        with open(CUSTOM_TOOLS_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_custom_tools(tools):
+    with open(CUSTOM_TOOLS_FILE, 'w') as f:
+        json.dump(tools, f, indent=4)
+
+@app.get("/api/tools/custom")
+async def get_custom_tools():
+    return load_custom_tools()
+
+@app.post("/api/tools/custom")
+async def create_custom_tool(tool: dict):
+    # Expects: { id, name, description, method (GET/POST), url, schema }
+    tools = load_custom_tools()
+    # Check duplicate
+    if any(t['name'] == tool['name'] for t in tools):
+         # Update existing
+         tools = [t if t['name'] != tool['name'] else tool for t in tools]
+    else:
+         tools.append(tool)
+    save_custom_tools(tools)
+    return {"status": "success", "tool": tool}
+
+@app.delete("/api/tools/custom/{tool_name}")
+async def delete_custom_tool(tool_name: str):
+    tools = load_custom_tools()
+    tools = [t for t in tools if t['name'] != tool_name]
+    save_custom_tools(tools)
+    return {"status": "success"}
 
 # --- Agent Management Logic ---
 class Agent(BaseModel):
@@ -484,16 +523,30 @@ async def chat(request: ChatRequest):
     
     print(f"DEBUG: Using Agent '{active_agent.get('name')}' with tools: {allowed_tools}")
 
+    # Standard MCP Tools
     for session in agent_sessions.values():
         result = await session.list_tools()
-        # Filter Logic
         if "all" in allowed_tools:
             all_tools.extend(result.tools)
         else:
             for t in result.tools:
                 if t.name in allowed_tools:
                     all_tools.extend([t])
+
+    # Dynamic Custom Tools (n8n/Webhook)
+    custom_tools = load_custom_tools()
+    # We map custom tools to a simplified object that looks like an MCP tool
+    class VirtualTool:
+        def __init__(self, name, description, inputSchema):
+            self.name = name
+            self.description = description
+            self.inputSchema = inputSchema
     
+    for ct in custom_tools:
+        # If 'all' or explicitly listed
+        if "all" in allowed_tools or ct['name'] in allowed_tools:
+             all_tools.append(VirtualTool(ct['name'], ct['description'], ct['inputSchema']))
+
     # 2. System Prompt
     # Prepare tools for Ollama Native API (List of dicts)
     ollama_tools = [{'type': 'function', 'function': {'name': t.name, 'description': t.description, 'parameters': t.inputSchema}} for t in all_tools]
@@ -769,6 +822,50 @@ async def chat(request: ChatRequest):
                 print(f"DEBUG: EXTRACTED TOOL ARGS: {tool_name} -> {tool_args}")
                 
                 if tool_name not in tool_router:
+                     # Check if it is a Custom Dynamic Tool
+                     custom_tools = load_custom_tools()
+                     target_tool = next((t for t in custom_tools if t['name'] == tool_name), None)
+                     
+                     if target_tool:
+                         print(f"Executing Custom Tool {tool_name} via Webhook...")
+                         try:
+                             # Generic Webhook Execution
+                             method = target_tool.get("method", "POST")
+                             url = target_tool.get("url")
+                             if not url: raise ValueError("No URL configured for this tool.")
+                             
+                             # We assume n8n/webhook style: POST with JSON body
+                             resp = await client.request(method, url, json=tool_args, timeout=30.0)
+                             
+                             # Try to parse JSON response
+                             try:
+                                 json_resp = resp.json()
+                                 
+                                 # 1. Output Filtering (if outputSchema properties defined)
+                                 # This is a basic filter: if 'properties' are defined in outputSchema, 
+                                 # we only keep those keys from the root level of the response.
+                                 output_schema = target_tool.get("outputSchema", {})
+                                 if output_schema and "properties" in output_schema and isinstance(json_resp, dict):
+                                     filtered_resp = {}
+                                     for key in output_schema["properties"].keys():
+                                         if key in json_resp:
+                                             filtered_resp[key] = json_resp[key]
+                                     # If we found matching keys, use the filtered version
+                                     if filtered_resp:
+                                         json_resp = filtered_resp
+
+                                 raw_output = json.dumps(json_resp)
+                             except:
+                                 raw_output = resp.text
+                                 
+                             current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
+                             tools_used_summary.append(f"{tool_name}: {raw_output[:500]}...")
+                             # Continue loop
+                             continue
+                         except Exception as e:
+                             current_context_text += f"\nSystem: Error executing custom tool {tool_name}: {str(e)}\n"
+                             continue
+                             
                      # Hallucinated tool, append error and continue
                      current_context_text += f"\nSystem: Error - Tool '{tool_name}' not found. Please try a valid tool.\n"
                      continue

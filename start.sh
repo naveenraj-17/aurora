@@ -64,6 +64,7 @@ wait_for_url() {
 echo "Checking Backend..."
 if ! check_port 8000; then
     echo "Starting Backend..."
+    source backend/venv/bin/activate
     python3 backend/main.py &
     BACKEND_PID=$!
     echo "Backend started with PID $BACKEND_PID"

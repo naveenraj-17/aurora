@@ -9,6 +9,7 @@
 backend/venv/
 backend/data/
 !backend/data/user_agents.json
+!backend/data/custom_tools.json
 
 # Javascript / Frontend
 frontend/node_modules/

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save } from 'lucide-react';
+import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save, Wrench, ExternalLink } from 'lucide-react';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -10,7 +10,7 @@ interface SettingsModalProps {
     onToggleBrowser: (val: boolean) => void;
 }
 
-type Tab = 'general' | 'models' | 'workspace' | 'database' | 'memory' | 'agents' | 'datalab';
+type Tab = 'general' | 'models' | 'workspace' | 'database' | 'memory' | 'agents' | 'datalab' | 'custom_tools';
 
 // Tool Group Definitions for UI
 const CAPABILITIES = [
@@ -82,6 +82,11 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
     const [draftAgent, setDraftAgent] = useState<any>(null);
 
+
+    // Custom Tools State
+    const [customTools, setCustomTools] = useState<any[]>([]);
+    const [draftTool, setDraftTool] = useState<any>(null);
+    const [toolBuilderMode, setToolBuilderMode] = useState<'config' | 'n8n'>('config');
 
     // Confirmation Modal State
     const [confirmAction, setConfirmAction] = useState<{ type: 'recent' | 'all', message: string } | null>(null);
@@ -204,13 +209,60 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                 .then(res => res.json())
                 .then(data => {
                     setAgents(Array.isArray(data) ? data : []);
-                    if (data && data.length > 0 && !selectedAgentId) {
-                        // Don't auto-select to allow "Create New" flow naturally, 
-                        // but listing them is enough.
-                    }
+                });
+            
+            // Get Custom Tools
+            fetch('/api/tools/custom')
+                .then(res => res.json())
+                .then(data => {
+                    setCustomTools(Array.isArray(data) ? data : []);
                 });
         }
     }, [isOpen]);
+
+    // Handle Save Custom Tool
+    const handleSaveTool = async () => {
+        if (!draftTool) return;
+        // Validate
+        if (!draftTool.name || !draftTool.url) {
+            alert("Name and URL are required.");
+            return;
+        }
+
+        try {
+            const res = await fetch('/api/tools/custom', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(draftTool)
+            });
+            if (res.ok) {
+                const saved = await res.json();
+                // Refresh list
+                const idx = customTools.findIndex((t: any) => t.name === draftTool.name);
+                if (idx >= 0) {
+                    const newTools = [...customTools];
+                    newTools[idx] = draftTool;
+                    setCustomTools(newTools);
+                } else {
+                    setCustomTools([...customTools, draftTool]);
+                }
+                setDraftTool(null);
+                setToolBuilderMode('config');
+                alert("Tool saved successfully!");
+            }
+        } catch (e) {
+            alert("Error saving tool.");
+        }
+    };
+
+    // Handle Delete Tool
+    const handleDeleteTool = async (name: string) => {
+        if (!confirm("Delete this tool?")) return;
+        try {
+            await fetch(`/api/tools/custom/${name}`, { method: 'DELETE' });
+            setCustomTools(customTools.filter(t => t.name !== name));
+        } catch (e) { alert("Error deleting tool"); }
+    };
 
     // Handle Save Agent
     const handleSaveAgent = async () => {
@@ -264,6 +316,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     const tabs = [
         { id: 'general', label: 'General', icon: LayoutGrid },
         { id: 'agents', label: 'Build Agents', icon: Bot },
+        { id: 'custom_tools', label: 'Tool Builder', icon: Wrench },
         { id: 'datalab', label: 'Data Lab', icon: Database },
         { id: 'models', label: 'Models', icon: Cpu },
         { id: 'workspace', label: 'Google Workspace', icon: Cloud },
@@ -563,6 +616,179 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                 </div>
                                             )}
                                         </div>
+                                    </div>
+                                )}
+
+                                {/* CUSTOM TOOLS TAB */}
+                                {activeTab === 'custom_tools' && (
+                                    <div className="h-[600px] flex flex-col">
+                                        {!draftTool ? (
+                                            /* List View */
+                                            <div className="space-y-4">
+                                                <div className="flex justify-between items-center">
+                                                    <div>
+                                                        <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                                                            <Wrench className="h-5 w-5" /> Custom Tools
+                                                        </h3>
+                                                        <p className="text-zinc-500 text-sm">Extend your agent with n8n workflows or webhooks.</p>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => setDraftTool({
+                                                            name: "",
+                                                            description: "",
+                                                            url: "",
+                                                            method: "POST",
+                                                            inputSchema: { type: "object", properties: { input: { type: "string" } } }
+                                                        })}
+                                                        className="px-4 py-2 bg-white text-black font-bold text-xs uppercase flex items-center gap-2 hover:bg-zinc-200"
+                                                    >
+                                                        <Plus className="h-4 w-4" /> Create Tool
+                                                    </button>
+                                                </div>
+
+                                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                    {customTools.map((t: any) => (
+                                                        <div key={t.name} className="p-4 bg-zinc-900 border border-zinc-800 hover:border-zinc-600 transition-all group relative">
+                                                            <div className="font-bold text-white mb-1">{t.name}</div>
+                                                            <div className="text-xs text-zinc-500 mb-2 h-8 overflow-hidden">{t.description}</div>
+                                                            <div className="text-[10px] font-mono text-zinc-600 truncate">{t.url}</div>
+                                                            <button 
+                                                                onClick={() => handleDeleteTool(t.name)}
+                                                                className="absolute top-2 right-2 p-1 text-zinc-600 hover:text-red-500 opacity-0 group-hover:opacity-100"
+                                                            >
+                                                                <Trash className="h-4 w-4" />
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => setDraftTool(t)}
+                                                                className="absolute bottom-2 right-2 text-[10px] text-zinc-400 hover:text-white font-bold uppercase"
+                                                            >
+                                                                Edit
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                    {customTools.length === 0 && (
+                                                        <div className="col-span-full py-12 text-center text-zinc-600 italic text-sm border border-dashed border-zinc-800">
+                                                            No custom tools yet. Build one to connect n8n!
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            /* Builder View */
+                                            <div className="flex flex-col h-full">
+                                                <div className="flex items-center justify-between mb-4 pb-4 border-b border-zinc-800">
+                                                    <div className="flex items-center gap-4">
+                                                        <button onClick={() => { setDraftTool(null); setToolBuilderMode('config'); }} className="text-zinc-500 hover:text-white">
+                                                            <X className="h-5 w-5" />
+                                                        </button>
+                                                        <h3 className="font-bold text-white uppercase tracking-wider">
+                                                            {draftTool.name ? `Editing: ${draftTool.name}` : 'New Tool Builder'}
+                                                        </h3>
+                                                    </div>
+                                                    <div className="flex gap-2">
+                                                        <div className="flex bg-zinc-900 border border-zinc-800 p-1 rounded">
+                                                            <button 
+                                                                onClick={() => setToolBuilderMode('config')}
+                                                                className={`px-3 py-1 text-xs font-bold rounded ${toolBuilderMode === 'config' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                                            >
+                                                                CONFIG
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => setToolBuilderMode('n8n')}
+                                                                className={`px-3 py-1 text-xs font-bold rounded ${toolBuilderMode === 'n8n' ? 'bg-[#ff6d5a] text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
+                                                            >
+                                                                n8n BUILDER
+                                                            </button>
+                                                        </div>
+                                                        <button onClick={handleSaveTool} className="px-4 py-1.5 bg-white text-black text-xs font-bold hover:bg-zinc-200">
+                                                            SAVE
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                {toolBuilderMode === 'config' ? (
+                                                    <div className="space-y-6 overflow-y-auto pr-2">
+                                                        <div className="grid grid-cols-2 gap-4">
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Tool Name (Snake Case)</label>
+                                                                <input type="text" value={draftTool.name} onChange={e => setDraftTool({...draftTool, name: e.target.value})}
+                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono" placeholder="create_invoice" />
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Method</label>
+                                                                <select value={draftTool.method} onChange={e => setDraftTool({...draftTool, method: e.target.value})}
+                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none">
+                                                                    <option>POST</option>
+                                                                    <option>GET</option>
+                                                                </select>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="space-y-1">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-500">Description (For AI)</label>
+                                                            <input type="text" value={draftTool.description} onChange={e => setDraftTool({...draftTool, description: e.target.value})}
+                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none" 
+                                                                placeholder="Creates an invoice in Xero given an amount and email." />
+                                                        </div>
+
+                                                        <div className="space-y-1">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-500">Webhook URL</label>
+                                                            <input type="text" value={draftTool.url} onChange={e => setDraftTool({...draftTool, url: e.target.value})}
+                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-[#ff6d5a] focus:border-[#ff6d5a] focus:outline-none font-mono" 
+                                                                placeholder="http://localhost:5678/webhook/..." />
+                                                            <p className="text-[10px] text-zinc-600">
+                                                                Copy this from the "Webhook" node in the n8n Builder tab.
+                                                            </p>
+                                                        </div>
+
+                                                        <div className="grid grid-cols-2 gap-4 flex-1 min-h-0">
+                                                            <div className="space-y-1 flex flex-col">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Input Schema (JSON)</label>
+                                                                <textarea 
+                                                                    value={JSON.stringify(draftTool.inputSchema, null, 2)}
+                                                                    onChange={e => {
+                                                                        try {
+                                                                            const parsed = JSON.parse(e.target.value);
+                                                                            setDraftTool({...draftTool, inputSchema: parsed});
+                                                                        } catch(err) {}
+                                                                    }}
+                                                                    className="w-full flex-1 bg-zinc-950 border border-zinc-800 p-3 text-[10px] font-mono text-zinc-300 focus:border-white focus:outline-none resize-none"
+                                                                    placeholder='{"type": "object", "properties": {"msg": {"type": "string"}}}'
+                                                                />
+                                                            </div>
+                                                            <div className="space-y-1 flex flex-col">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Output Schema (JSON)</label>
+                                                                <textarea 
+                                                                    value={draftTool.outputSchema ? JSON.stringify(draftTool.outputSchema, null, 2) : ""}
+                                                                    onChange={e => {
+                                                                        try {
+                                                                            const parsed = JSON.parse(e.target.value);
+                                                                            setDraftTool({...draftTool, outputSchema: parsed});
+                                                                        } catch(err) {}
+                                                                    }}
+                                                                    className="w-full flex-1 bg-zinc-900 border border-zinc-800 p-3 text-[10px] font-mono text-zinc-400 focus:border-white focus:outline-none resize-none"
+                                                                    placeholder='(Optional) {"properties": {"id": {"type": "string"}}} - Filters response to these keys.'
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex-1 bg-white relative overflow-hidden border border-zinc-800">
+                                                        <div className="absolute inset-0 flex items-center justify-center text-black/50 z-0">
+                                                            <div className="text-center">
+                                                                <p className="font-bold">Loading n8n Editor...</p>
+                                                                <p className="text-xs">Ensure n8n is running at http://localhost:5678</p>
+                                                            </div>
+                                                        </div>
+                                                        <iframe 
+                                                            src="http://localhost:5678/" 
+                                                            className="absolute inset-0 w-full h-full z-10"
+                                                            title="n8n Editor"
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
