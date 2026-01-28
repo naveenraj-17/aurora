@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import httpx
+import boto3
 from services.google import get_auth_url, finish_auth
 from services.synthetic_data import generate_synthetic_data, SyntheticDataRequest, current_job, DATASETS_DIR
 from datetime import datetime
@@ -32,6 +33,7 @@ AGENTS = {
     "calendar": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "calendar_agent.py"),
     "local_file_agent": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "local_file.py"),
     "browser": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "browser.py"),
+    "sql": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "sql_agent.py"),
 }
 
 class ChatRequest(BaseModel):
@@ -53,25 +55,25 @@ memory_store = None
 from collections import deque
 conversation_history = deque(maxlen=10) # Keep last 10 turns
 
-# System Prompt for Native Tool Calling (Simple & Direct)
-NATIVE_TOOL_SYSTEM_PROMPT = """You are a smart Personal Assistant Agent.
-Your goal is to HELP the user by calling the appropriate tools when needed.
+# System Prompt for Native Tool Calling (Enterprise/Business Focused)
+NATIVE_TOOL_SYSTEM_PROMPT = """You are the Enterprise Business Intelligence Agent for a SaaS Platform.
+Your mission is to assist managers, executives, and developers by retrieving accurate data, managing system operations, and explaining technical documentation.
 
-### CRITICAL RULES: ID USAGE
-* **NEVER guess or hallucinate IDs** (e.g. "email_123", "file_abc").
-* **ALWAYS call list tools first** (like `list_emails`, `list_files`) to find real IDs.
-* **THEN** call read/get tools with the *exact* ID found.
+### CORE OPERATING RULES
+1.  **Think Step-by-Step:** Before calling a tool, briefly analyze the user's request. Determine if you need to fetch a list (IDs) before you can act on a specific item.
+2.  **Accuracy First:** Never guess IDs (e.g., `unit_123`, `email_999`). Always use `list_` or `search_` tools to find the real ID first.
+3.  **Data Integrity:** When summarizing data (revenue, counts), be precise. Do not round numbers unless asked.
+4.  **Security:** You are operating in a secure environment. You can access internal APIs and Databases via provided tools.
 
-### CRITICAL RULES: PARAMETER EXTRACTION
-* **limit**: 
-    - "all", "every" -> 100
-    - "3 emails" -> 3
-    - "the last email" -> 1
-    - Default -> 5
-* **query**:
-    - "Important" -> "is:important"
-    - "Unread" -> "is:unread"
-    - "Sent" -> "is:sent"
+### TOOL USAGE PROTOCOL
+*   **Listing vs. Acting:** If the user says "Email the last user", you MUST first call `list_users` or `get_recent_...` to get the email address. You cannot email a "concept".
+*   **Parameters:**
+    *   `limit`: Default to 5 unless specified (e.g., "all" -> 100).
+    *   `query`: Convert natural language to search terms (e.g., "urgent" -> "is:urgent").
+
+### RESPONSE STYLE
+*   **Business Professional:** Be concise. No fluff.
+*   **Action-Oriented:** If a task is done, say it. If data is retrieved, present it clearly (tables/lists).
 """
 
 def get_recent_history_messages():
@@ -227,6 +229,10 @@ class Settings(BaseModel):
     openai_key: str = ""
     anthropic_key: str = ""
     gemini_key: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-east-1"
+    sql_connection_string: str = ""
     show_browser: bool = False
 
 def save_settings(settings: dict):
@@ -386,12 +392,15 @@ async def list_datasets():
         })
     return sorted(results, key=lambda x: x["created"], reverse=True)
 
+@app.get("/api/models")
 async def get_models():
     """Fetches available models from Ollama + Cloud Options."""
     cloud_models = [
         "gpt-4o", "gpt-4-turbo", 
         "claude-3-5-sonnet", 
-        "gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"
+        "gemini-3-pro-preview", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash",
+        "bedrock.anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "bedrock.anthropic.claude-3-sonnet-20240229-v1:0"
     ]
     
     local_models = []
@@ -535,6 +544,41 @@ async def chat(request: ChatRequest):
             resp.raise_for_status()
             return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
+    async def call_bedrock(model_id, messages, system, access_key, secret_key, region):
+        # Bedrock requires the exact model ID (e.g., anthropic.claude-3-5-sonnet-20240620-v1:0)
+        # We strip the 'bedrock.' prefix if present
+        real_model_id = model_id.replace("bedrock.", "")
+        
+        # Convert messages to Bedrock Converse API format or InvokeModel
+        # Using Converse API (standardized) is preferred for newer models
+        
+        bedrock = boto3.client(
+            service_name='bedrock-runtime',
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key
+        )
+        
+        # Format for Claude 3 via Bedrock InvokeModel (Messages API)
+        body = json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 4096,
+            "system": system,
+            "messages": messages
+        })
+        
+        # This is a synchronous call in boto3, so we might block the event loop slightly.
+        # In production, run in a threadpool. For hackathon, it's fine.
+        response = bedrock.invoke_model(
+            body=body,
+            modelId=real_model_id,
+            accept='application/json',
+            contentType='application/json'
+        )
+        
+        response_body = json.loads(response.get('body').read())
+        return response_body.get('content')[0].get('text')
+
     async def generate_response(prompt_msg, sys_prompt, tools=None, history_messages=None):
         if mode == "cloud":
             try:
@@ -546,7 +590,16 @@ async def chat(request: ChatRequest):
                 elif current_model.startswith("claude"):
                     return await call_anthropic(current_model, messages, sys_prompt, current_settings.get("anthropic_key"))
                 elif current_model.startswith("gemini"):
-                    return await call_gemini(current_model, prompt_msg, sys_prompt, current_settings.get("gemini_key")) # Simplification for Gemini REST
+                    return await call_gemini(current_model, prompt_msg, sys_prompt, current_settings.get("gemini_key"))
+                elif current_model.startswith("bedrock"):
+                    return await call_bedrock(
+                        current_model, 
+                        messages, 
+                        sys_prompt, 
+                        current_settings.get("aws_access_key_id"),
+                        current_settings.get("aws_secret_access_key"),
+                        current_settings.get("aws_region")
+                    )
                 else:
                     return "Error: Unknown cloud model selected."
             except Exception as e:

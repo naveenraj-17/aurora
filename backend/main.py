@@ -11,5 +11,5 @@ from core.server import app
 
 if __name__ == "__main__":
     print(f"Starting Backend Agent Server from {current_dir}...")
-    # Use string reference for reload to work if needed, but object is safer for paths
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Enable hot reload for development
+    uvicorn.run("core.server:app", host="0.0.0.0", port=8000, reload=True)

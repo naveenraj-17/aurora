@@ -10,7 +10,7 @@ interface SettingsModalProps {
     onToggleBrowser: (val: boolean) => void;
 }
 
-type Tab = 'general' | 'models' | 'workspace' | 'memory' | 'agents' | 'datalab';
+type Tab = 'general' | 'models' | 'workspace' | 'database' | 'memory' | 'agents' | 'datalab';
 
 // Tool Group Definitions for UI
 const CAPABILITIES = [
@@ -49,6 +49,12 @@ const CAPABILITIES = [
         label: 'Web Search',
         description: 'Search the internet for info.',
         tools: ['search_web']
+    },
+    {
+        id: 'sql',
+        label: 'SQL Database',
+        description: 'Query business database (Tables, SQL).',
+        tools: ['list_tables', 'get_table_schema', 'run_sql_query']
     }
 ];
 
@@ -66,6 +72,10 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     const [openaiKey, setOpenaiKey] = useState('');
     const [anthropicKey, setAnthropicKey] = useState('');
     const [geminiKey, setGeminiKey] = useState('');
+    const [awsAccessKey, setAwsAccessKey] = useState('');
+    const [awsSecretKey, setAwsSecretKey] = useState('');
+    const [awsRegion, setAwsRegion] = useState('us-east-1');
+    const [sqlConnectionString, setSqlConnectionString] = useState('');
 
     // Agents State
     const [agents, setAgents] = useState<any[]>([]);
@@ -172,6 +182,10 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                     setOpenaiKey(data.openai_key || '');
                     setAnthropicKey(data.anthropic_key || '');
                     setGeminiKey(data.gemini_key || '');
+                    setAwsAccessKey(data.aws_access_key_id || '');
+                    setAwsSecretKey(data.aws_secret_access_key || '');
+                    setAwsRegion(data.aws_region || 'us-east-1');
+                    setSqlConnectionString(data.sql_connection_string || '');
                 });
 
             // Get models
@@ -253,6 +267,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
         { id: 'datalab', label: 'Data Lab', icon: Database },
         { id: 'models', label: 'Models', icon: Cpu },
         { id: 'workspace', label: 'Google Workspace', icon: Cloud },
+        { id: 'database', label: 'Database', icon: Database },
         { id: 'memory', label: 'Memory', icon: Trash }, // Icon change for memory to differentiate? Keeping Database for Data Lab.
     ];
 
@@ -467,70 +482,79 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                         </div>
                                                     </div>
 
-                                                    <div className="space-y-1">
-                                                        <label className="text-[10px] font-bold text-zinc-500 uppercase">Capabilities (Tools)</label>
-                                                        <div className="grid grid-cols-2 gap-2">
-                                                            {CAPABILITIES.map(cap => {
-                                                                const isEnabled = draftAgent.tools.includes("all") || cap.tools.every(t => draftAgent.tools.includes(t));
-                                                                return (
-                                                                    <div
-                                                                        key={cap.id}
-                                                                        onClick={() => {
-                                                                            if (draftAgent.tools.includes("all")) {
-                                                                                // If all, switching to selective means we add ALL tools except this one? 
-                                                                                // Or better, just clear "all" and add specific tools.
-                                                                                // Complex logic. For MVP:
-                                                                                // If switching OFF a capability while "all" is true -> Remove "all", add all defined tools MINUS this group.
-                                                                                // But for simplicity of Phase 1, "Aurora" is "all". Others are specific.
-                                                                                if (isEnabled) {
-                                                                                    // Disable
-                                                                                    // Replace "all" with all flattened tools minus this group
-                                                                                    const allToolsFlat = CAPABILITIES.flatMap(c => c.tools);
-                                                                                    const newTools = allToolsFlat.filter(t => !cap.tools.includes(t));
-                                                                                    setDraftAgent({ ...draftAgent, tools: newTools });
-                                                                                } else {
-                                                                                    // Enable
-                                                                                    // Add these tools
-                                                                                    // If we now have ALL tools, maybe switch back to "all"? Optional.
-                                                                                    setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
-                                                                                }
-                                                                            } else {
-                                                                                // Standard Toggle
-                                                                                if (isEnabled) {
-                                                                                    // Remove
-                                                                                    const newTools = draftAgent.tools.filter((t: string) => !cap.tools.includes(t));
-                                                                                    setDraftAgent({ ...draftAgent, tools: newTools });
-                                                                                } else {
-                                                                                    // Add
-                                                                                    setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
-                                                                                }
-                                                                            }
-                                                                        }}
-                                                                        className={`p-2 border cursor-pointer hover:border-zinc-500 transition-colors
-                                                                            ${isEnabled
-                                                                                ? 'bg-zinc-900 border-zinc-600'
-                                                                                : 'bg-black border-zinc-800 opacity-50'
-                                                                            }`}
-                                                                    >
-                                                                        <div className="flex items-center gap-2">
-                                                                            <div className={`w-3 h-3 border ${isEnabled ? 'bg-green-500 border-green-500' : 'border-zinc-600'}`}></div>
-                                                                            <span className="text-xs font-bold text-white">{cap.label}</span>
-                                                                        </div>
-                                                                        <p className="text-[9px] text-zinc-500 mt-1 pl-5">{cap.description}</p>
-                                                                    </div>
-                                                                );
-                                                            })}
+                                                    {draftAgent.id === 'aurora' ? (
+                                                        <div className="p-4 bg-blue-900/10 border border-blue-900/30 text-blue-300 text-xs text-center">
+                                                            <div className="font-bold mb-1">System Managed</div>
+                                                            The capabilities and brain of the default agent are managed by the core system for optimal business performance.
                                                         </div>
-                                                    </div>
+                                                    ) : (
+                                                        <>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] font-bold text-zinc-500 uppercase">Capabilities (Tools)</label>
+                                                                <div className="grid grid-cols-2 gap-2">
+                                                                    {CAPABILITIES.map(cap => {
+                                                                        const isEnabled = draftAgent.tools.includes("all") || cap.tools.every(t => draftAgent.tools.includes(t));
+                                                                        return (
+                                                                            <div
+                                                                                key={cap.id}
+                                                                                onClick={() => {
+                                                                                    if (draftAgent.tools.includes("all")) {
+                                                                                        // If all, switching to selective means we add ALL tools except this one? 
+                                                                                        // Or better, just clear "all" and add specific tools.
+                                                                                        // Complex logic. For MVP:
+                                                                                        // If switching OFF a capability while "all" is true -> Remove "all", add all defined tools MINUS this group.
+                                                                                        // But for simplicity of Phase 1, "Aurora" is "all". Others are specific.
+                                                                                        if (isEnabled) {
+                                                                                            // Disable
+                                                                                            // Replace "all" with all flattened tools minus this group
+                                                                                            const allToolsFlat = CAPABILITIES.flatMap(c => c.tools);
+                                                                                            const newTools = allToolsFlat.filter(t => !cap.tools.includes(t));
+                                                                                            setDraftAgent({ ...draftAgent, tools: newTools });
+                                                                                        } else {
+                                                                                            // Enable
+                                                                                            // Add these tools
+                                                                                            // If we now have ALL tools, maybe switch back to "all"? Optional.
+                                                                                            setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
+                                                                                        }
+                                                                                    } else {
+                                                                                        // Standard Toggle
+                                                                                        if (isEnabled) {
+                                                                                            // Remove
+                                                                                            const newTools = draftAgent.tools.filter((t: string) => !cap.tools.includes(t));
+                                                                                            setDraftAgent({ ...draftAgent, tools: newTools });
+                                                                                        } else {
+                                                                                            // Add
+                                                                                            setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
+                                                                                        }
+                                                                                    }
+                                                                                }}
+                                                                                className={`p-2 border cursor-pointer hover:border-zinc-500 transition-colors
+                                                                                    ${isEnabled
+                                                                                        ? 'bg-zinc-900 border-zinc-600'
+                                                                                        : 'bg-black border-zinc-800 opacity-50'
+                                                                                    }`}
+                                                                            >
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <div className={`w-3 h-3 border ${isEnabled ? 'bg-green-500 border-green-500' : 'border-zinc-600'}`}></div>
+                                                                                    <span className="text-xs font-bold text-white">{cap.label}</span>
+                                                                                </div>
+                                                                                <p className="text-[9px] text-zinc-500 mt-1 pl-5">{cap.description}</p>
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
 
-                                                    <div className="space-y-1 flex-1 flex flex-col min-h-0">
-                                                        <label className="text-[10px] font-bold text-zinc-500 uppercase">System Prompt (The Brain)</label>
-                                                        <textarea
-                                                            value={draftAgent.system_prompt}
-                                                            onChange={e => setDraftAgent({ ...draftAgent, system_prompt: e.target.value })}
-                                                            className="w-full flex-1 min-h-[200px] bg-zinc-950 border border-zinc-800 p-3 text-xs font-mono text-zinc-300 focus:border-white focus:outline-none resize-none leading-relaxed"
-                                                        />
-                                                    </div>
+                                                            <div className="space-y-1 flex-1 flex flex-col min-h-0">
+                                                                <label className="text-[10px] font-bold text-zinc-500 uppercase">System Prompt (The Brain)</label>
+                                                                <textarea
+                                                                    value={draftAgent.system_prompt}
+                                                                    onChange={e => setDraftAgent({ ...draftAgent, system_prompt: e.target.value })}
+                                                                    className="w-full flex-1 min-h-[200px] bg-zinc-950 border border-zinc-800 p-3 text-xs font-mono text-zinc-300 focus:border-white focus:outline-none resize-none leading-relaxed"
+                                                                />
+                                                            </div>
+                                                        </>
+                                                    )}
                                                 </div>
                                             ) : (
                                                 <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-4">
@@ -729,6 +753,25 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                     <input type="password" value={geminiKey} onChange={e => setGeminiKey(e.target.value)}
                                                         className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="AIza..." />
                                                 </div>
+                                                
+                                                <div className="pt-4 border-t border-zinc-800/50 space-y-4">
+                                                    <h4 className="text-xs font-bold text-white uppercase">AWS Bedrock Configuration</h4>
+                                                    <div className="space-y-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Access Key ID</label>
+                                                        <input type="password" value={awsAccessKey} onChange={e => setAwsAccessKey(e.target.value)}
+                                                            className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="AKIA..." />
+                                                    </div>
+                                                    <div className="space-y-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Secret Access Key</label>
+                                                        <input type="password" value={awsSecretKey} onChange={e => setAwsSecretKey(e.target.value)}
+                                                            className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="Secret Key..." />
+                                                    </div>
+                                                    <div className="space-y-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Region</label>
+                                                        <input type="text" value={awsRegion} onChange={e => setAwsRegion(e.target.value)}
+                                                            className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="us-east-1" />
+                                                    </div>
+                                                </div>
                                             </div>
                                         )}
                                     </div>
@@ -847,6 +890,45 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                     </div>
                                 )}
 
+                                {/* DATABASE TAB */}
+                                {activeTab === 'database' && (
+                                    <div className="space-y-8">
+                                        <div className="mb-4">
+                                            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                                                <Database className="h-5 w-5" />
+                                                SQL Database Connection
+                                            </h3>
+                                            <p className="text-zinc-500 text-sm mt-1">
+                                                Connect your agent to a SQL database (PostgreSQL, MySQL, SQLite) to enable business intelligence capabilities.
+                                            </p>
+                                        </div>
+
+                                        <div className="space-y-4">
+                                            <div className="space-y-2">
+                                                <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Connection String (SQLAlchemy URL)</label>
+                                                <input
+                                                    type="password"
+                                                    value={sqlConnectionString}
+                                                    onChange={(e) => setSqlConnectionString(e.target.value)}
+                                                    className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors font-mono"
+                                                    placeholder="postgresql://user:password@localhost:5432/dbname"
+                                                />
+                                                <p className="text-xs text-zinc-600">
+                                                    Format: <code>dialect+driver://username:password@host:port/database</code><br/>
+                                                    Examples:<br/>
+                                                    - Postgres: <code>postgresql://scott:tiger@localhost/test</code><br/>
+                                                    - MySQL: <code>mysql+pymysql://user:pass@localhost/foo</code><br/>
+                                                    - SQLite: <code>sqlite:///foo.db</code>
+                                                </p>
+                                            </div>
+                                            
+                                            <div className="p-4 bg-zinc-900/50 border border-zinc-800 text-xs text-zinc-400">
+                                                <strong>Security Note:</strong> The agent will have access to execute queries. Use a read-only user if possible.
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* MEMORY TAB */}
                                 {activeTab === 'memory' && (
                                     <div className="space-y-8">
@@ -897,7 +979,16 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                             </button>
                             <button
                                 onClick={() => {
-                                    onSave(agentName, selectedModel, mode, { openai_key: openaiKey, anthropic_key: anthropicKey, gemini_key: geminiKey, show_browser: showBrowser });
+                                    onSave(agentName, selectedModel, mode, { 
+                                        openai_key: openaiKey, 
+                                        anthropic_key: anthropicKey, 
+                                        gemini_key: geminiKey, 
+                                        aws_access_key_id: awsAccessKey,
+                                        aws_secret_access_key: awsSecretKey,
+                                        aws_region: awsRegion,
+                                        sql_connection_string: sqlConnectionString,
+                                        show_browser: showBrowser 
+                                    });
                                     onClose();
                                 }}
                                 className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:shadow-[0_0_25px_rgba(255,255,255,0.2)]"

@@ -18,6 +18,10 @@ def load_settings():
         "openai_key": "",
         "anthropic_key": "",
         "gemini_key": "",
+        "aws_access_key_id": "",
+        "aws_secret_access_key": "",
+        "aws_region": "us-east-1",
+        "sql_connection_string": "",
         "show_browser": False
     }
     
