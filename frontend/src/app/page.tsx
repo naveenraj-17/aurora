@@ -39,7 +39,15 @@ export default function Home() {
 
   // Helper to refresh status
   const refreshSystemStatus = () => {
-    fetch('/api/status').then(r => r.json()).then(d => setSystemStatus(d)).catch(console.error);
+    fetch('/api/status').then(r => r.json()).then(d => {
+      setSystemStatus(d);
+      // Sync agent name with active agent from status to fix initial render mismatch
+      if (d.active_agent_id && d.agents && d.agents[d.active_agent_id]) {
+        const info = d.agents[d.active_agent_id];
+        const name = typeof info === 'string' ? d.active_agent_id : info.name;
+        setAgentName(name);
+      }
+    }).catch(console.error);
   };
 
   // Initial Data Fetch
@@ -291,7 +299,7 @@ export default function Home() {
                     {/* Intent Indicator for Assistant */}
                     {msg.role === 'assistant' && msg.intent && (
                       <div className="absolute -top-3 left-2 bg-zinc-950 border border-zinc-800 px-2 py-0.5 text-[8px] uppercase tracking-wider text-zinc-500">
-                        {msg.intent} Operation
+                        {msg.intent.replaceAll('_', ' ')} Operation
                       </div>
                     )}
 

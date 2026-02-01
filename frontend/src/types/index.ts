@@ -37,8 +37,9 @@ export interface LocalFile {
 export interface Message {
     role: 'user' | 'assistant';
     content: string;
-    intent?: 'chat' | 'list_emails' | 'read_email' | 'list_files' | 'list_events' | 'request_auth' | 'list_local_files' | 'render_local_file' | 'draft_email' | 'send_email';
+    intent?: 'chat' | 'list_emails' | 'read_email' | 'list_files' | 'list_events' | 'request_auth' | 'list_local_files' | 'render_local_file' | 'draft_email' | 'send_email' | 'custom_tool';
     data?: any;
+    tool?: string;
 }
 
 export interface SystemStatus {

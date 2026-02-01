@@ -43,6 +43,7 @@ class ChatResponse(BaseModel):
     response: str
     intent: str = "chat" # chat, list_emails, render_email, list_files, list_events, request_auth, list_local_files, render_local_file
     data: dict | None = None
+    tool_name: str | None = None
 
 # Global variables
 # Map of client_name -> session
@@ -554,8 +555,18 @@ async def chat(request: ChatRequest):
     # Keep the string version for Cloud models (System Prompt injection)
     tools_json = str([{'name': t.name, 'description': t.description, 'schema': t.inputSchema} for t in all_tools])
     
-    # Inject tools into the template
-    system_prompt_text = agent_system_template.replace("{tools_json}", tools_json)
+    TOOL_USAGE_INSTRUCTION = """
+    
+    ### RESPONSE FORMAT INSTRUCTIONS
+    If you need to use a specific tool from the list above, you MUST respond with **ONLY** a valid JSON object in the following format:
+    { "tool": "tool_name", "arguments": { "key": "value" } }
+    
+    Do NOT output any other text or markdown when calling a tool.
+    If you do not need to use a tool, reply in plain text.
+    """
+    
+    # Inject tools and instructions into the template
+    system_prompt_text = agent_system_template.replace("{tools_json}", tools_json + TOOL_USAGE_INSTRUCTION)
 
 
     current_settings = load_settings()
@@ -595,7 +606,19 @@ async def chat(request: ChatRequest):
                 timeout=60.0
             )
             resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            data = resp.json()
+            
+            if not data.get("candidates"):
+                return "Error: No response candidates from Gemini."
+            
+            candidate = data["candidates"][0]
+            if candidate.get("finishReason") == "SAFETY":
+                 return "Error: Response blocked by Gemini safety filters."
+            
+            if not candidate.get("content") or not candidate["content"].get("parts"):
+                 return f"Error: Malformed Gemini response. Finish Reason: {candidate.get('finishReason')}"
+
+            return candidate["content"]["parts"][0]["text"]
 
     async def call_bedrock(model_id, messages, system, access_key, secret_key, region):
         # Bedrock requires the exact model ID (e.g., anthropic.claude-3-5-sonnet-20240620-v1:0)
@@ -633,7 +656,7 @@ async def chat(request: ChatRequest):
         return response_body.get('content')[0].get('text')
 
     async def generate_response(prompt_msg, sys_prompt, tools=None, history_messages=None):
-        if mode == "cloud":
+        if mode in ["cloud", "bedrock"]:
             try:
                 # Construct messages list for cloud providers that support it
                 messages = [{"role": "user", "content": prompt_msg}]
@@ -832,15 +855,19 @@ async def chat(request: ChatRequest):
                              # Generic Webhook Execution
                              method = target_tool.get("method", "POST")
                              url = target_tool.get("url")
+                             headers = target_tool.get("headers", {})
                              if not url: raise ValueError("No URL configured for this tool.")
                              
                              # We assume n8n/webhook style: POST with JSON body
-                             resp = await client.request(method, url, json=tool_args, timeout=30.0)
+                             resp = await client.request(method, url, json=tool_args, headers=headers, timeout=30.0)
                              
+                            
                              # Try to parse JSON response
+                             json_resp = None
                              try:
                                  json_resp = resp.json()
                                  
+                                 print(f"DEBUG: JSON Response: {json_resp}")
                                  # 1. Output Filtering (if outputSchema properties defined)
                                  # This is a basic filter: if 'properties' are defined in outputSchema, 
                                  # we only keep those keys from the root level of the response.
@@ -858,8 +885,18 @@ async def chat(request: ChatRequest):
                              except:
                                  raw_output = resp.text
                                  
+                                 
                              current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
                              tools_used_summary.append(f"{tool_name}: {raw_output[:500]}...")
+                             
+                             # Capture intent/data before continuing (restarting loop)
+                             last_intent = "custom_tool"
+                             # Ensure last_data is a dictionary for the response
+                             if isinstance(json_resp, dict):
+                                 last_data = json_resp
+                             else:
+                                 last_data = {"output": raw_output}
+                             
                              # Continue loop
                              continue
                          except Exception as e:
@@ -960,7 +997,8 @@ async def chat(request: ChatRequest):
     return ChatResponse(
         response=final_response,
         intent=last_intent,
-        data=last_data
+        data=last_data,
+        tool_name=tool_name
     )
 
 if __name__ == "__main__":

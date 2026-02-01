@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save, Wrench, ExternalLink } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -87,6 +87,36 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     const [customTools, setCustomTools] = useState<any[]>([]);
     const [draftTool, setDraftTool] = useState<any>(null);
     const [toolBuilderMode, setToolBuilderMode] = useState<'config' | 'n8n'>('config');
+    const [headerRows, setHeaderRows] = useState<{ id: string, key: string, value: string }[]>([]);
+    const [showToast, setShowToast] = useState(false);
+
+    const handleSaveSection = () => {
+        onSave(agentName, selectedModel, mode, {
+            openai_key: openaiKey,
+            anthropic_key: anthropicKey,
+            gemini_key: geminiKey,
+            aws_access_key_id: awsAccessKey,
+            aws_secret_access_key: awsSecretKey,
+            aws_region: awsRegion,
+            sql_connection_string: sqlConnectionString,
+            show_browser: showBrowser
+        });
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 3000);
+    };
+
+    // Fullscreen State
+    const [isIframeFullscreen, setIsIframeFullscreen] = useState(false);
+    const [n8nWorkflowId, setN8nWorkflowId] = useState<string | null>(null);
+    const [isN8nLoading, setIsN8nLoading] = useState(true);
+    const n8nIframeRef = useRef<HTMLIFrameElement>(null);
+
+    // Reset n8n loading state when switching modes
+    useEffect(() => {
+        if (toolBuilderMode === 'n8n') {
+            setIsN8nLoading(true);
+        }
+    }, [toolBuilderMode]);
 
     // Confirmation Modal State
     const [confirmAction, setConfirmAction] = useState<{ type: 'recent' | 'all', message: string } | null>(null);
@@ -174,6 +204,14 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
         }
     };
 
+    // Close on escape
+    useEffect(() => {
+        const handleEsc = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') onClose();
+        };
+        document.addEventListener('keydown', handleEsc);
+        return () => document.removeEventListener('keydown', handleEsc);
+    }, [onClose]);
     // Fetch data on open
     useEffect(() => {
         if (isOpen) {
@@ -210,7 +248,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                 .then(data => {
                     setAgents(Array.isArray(data) ? data : []);
                 });
-            
+
             // Get Custom Tools
             fetch('/api/tools/custom')
                 .then(res => res.json())
@@ -229,11 +267,52 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
             return;
         }
 
+        // Validate Schemas
+        let finalInputSchema = draftTool.inputSchema;
+        let finalOutputSchema = draftTool.outputSchema;
+
         try {
+            if (typeof draftTool.inputSchemaStr === 'string') {
+                finalInputSchema = JSON.parse(draftTool.inputSchemaStr);
+            }
+        } catch (e) {
+            alert("Invalid Input Schema JSON");
+            return;
+        }
+
+        try {
+            if (typeof draftTool.outputSchemaStr === 'string' && draftTool.outputSchemaStr.trim()) {
+                finalOutputSchema = JSON.parse(draftTool.outputSchemaStr);
+            } else if (!draftTool.outputSchemaStr || !draftTool.outputSchemaStr.trim()) {
+                finalOutputSchema = undefined;
+            }
+        } catch (e) {
+            alert("Invalid Output Schema JSON");
+            return;
+        }
+
+        try {
+            // Convert header rows to object
+            const headersObj: Record<string, string> = {};
+            headerRows.forEach(r => {
+                if (r.key.trim()) headersObj[r.key.trim()] = r.value;
+            });
+
+            const payload = {
+                ...draftTool,
+                inputSchema: finalInputSchema,
+                outputSchema: finalOutputSchema,
+                headers: headersObj
+            };
+
+            // Clean up temporary fields
+            delete payload.inputSchemaStr;
+            delete payload.outputSchemaStr;
+
             const res = await fetch('/api/tools/custom', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(draftTool)
+                body: JSON.stringify(payload)
             });
             if (res.ok) {
                 const saved = await res.json();
@@ -241,14 +320,16 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                 const idx = customTools.findIndex((t: any) => t.name === draftTool.name);
                 if (idx >= 0) {
                     const newTools = [...customTools];
-                    newTools[idx] = draftTool;
+                    newTools[idx] = saved;
                     setCustomTools(newTools);
                 } else {
-                    setCustomTools([...customTools, draftTool]);
+                    setCustomTools([...customTools, saved]);
                 }
                 setDraftTool(null);
                 setToolBuilderMode('config');
                 alert("Tool saved successfully!");
+            } else {
+                alert("Failed to save tool");
             }
         } catch (e) {
             alert("Error saving tool.");
@@ -311,7 +392,9 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     if (!isOpen) return null;
 
     // Filter models based on mode
-    const filteredModels = mode === 'local' ? localModels : cloudModels;
+    const filteredModels = mode === 'local'
+        ? localModels
+        : (mode === 'bedrock' ? cloudModels.filter(m => m.startsWith('bedrock')) : cloudModels.filter(m => !m.startsWith('bedrock')));
 
     const tabs = [
         { id: 'general', label: 'General', icon: LayoutGrid },
@@ -328,7 +411,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     return (
         <>
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md animate-in fade-in duration-200 font-mono">
-                <div className="w-full h-full md:w-[90vw] md:h-[85vh] md:max-w-6xl md:border md:border-white/10 bg-black shadow-2xl flex flex-col md:flex-row overflow-hidden relative">
+                <div className="w-full h-full bg-black shadow-2xl flex flex-col md:flex-row overflow-hidden relative">
 
                     {/* Header (Mobile) / Close Button */}
                     <button
@@ -371,7 +454,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
 
                         <div className="p-4 border-t border-white/10 hidden md:block">
                             <div className="text-[10px] text-zinc-600 font-mono text-center">
-                                ANTIGRAVITY v1.0
+                                Aurora v1.0
                             </div>
                         </div>
                     </div>
@@ -380,7 +463,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                     {/* FIXED: Changed bg-black/50 to bg-transparent to allow parent bg-black (which inverts properly) to show through. */}
                     <div className="flex-1 flex flex-col h-full overflow-hidden bg-transparent">
                         <div className="flex-1 overflow-y-auto p-6 md:p-12">
-                            <div className="max-w-3xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-300">
+                            <div className="max-w-5xl mx-auto space-y-10 animate-in fade-in slide-in-from-bottom-4 duration-300">
 
                                 <div className="mb-8">
                                     <h1 className="text-3xl font-bold mb-2">{tabs.find(t => t.id === activeTab)?.label}</h1>
@@ -427,14 +510,22 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                 <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-zinc-400 after:border-zinc-300 after:border after:h-5 after:w-5 after:transition-all peer-checked:bg-white peer-checked:after:bg-black peer-checked:after:border-transparent"></div>
                                             </label>
                                         </div>
+                                        <div className="pt-4 flex justify-end">
+                                            <button
+                                                onClick={handleSaveSection}
+                                                className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-lg"
+                                            >
+                                                Save Changes
+                                            </button>
+                                        </div>
                                     </div>
                                 )}
 
                                 {/* AGENTS TAB */}
                                 {activeTab === 'agents' && (
-                                    <div className="grid grid-cols-1 md:grid-cols-12 gap-6 h-[600px]">
+                                    <div className="grid grid-cols-1 md:grid-cols-12 gap-10">
                                         {/* List */}
-                                        <div className="md:col-span-4 border-r border-zinc-800 pr-4 flex flex-col h-full">
+                                        <div className="md:col-span-4 border-r border-zinc-800 pr-4 flex flex-col sticky top-0 h-fit self-start">
                                             <div className="mb-4 flex justify-between items-center">
                                                 <h3 className="text-sm font-bold text-zinc-400">YOUR AGENTS</h3>
                                                 <button
@@ -456,7 +547,8 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                     <Plus className="h-4 w-4" />
                                                 </button>
                                             </div>
-                                            <div className="space-y-2 overflow-y-auto flex-1">
+
+                                            <div className="space-y-2 flex-1">
                                                 {Array.isArray(agents) && agents.map((a: any) => (
                                                     <div
                                                         key={a.id}
@@ -498,7 +590,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                         </div>
 
                                         {/* Edit Form */}
-                                        <div className="md:col-span-8 pl-4 h-full overflow-y-auto">
+                                        <div className="md:col-span-8 pl-4">
                                             {draftAgent ? (
                                                 <div className="space-y-6 h-full flex flex-col pb-4">
                                                     <div className="flex items-center justify-between">
@@ -514,14 +606,14 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                         </button>
                                                     </div>
 
-                                                    <div className="grid grid-cols-2 gap-4">
+                                                    <div className="grid grid-cols-2 gap-6">
                                                         <div className="space-y-1">
                                                             <label className="text-[10px] font-bold text-zinc-500 uppercase">Name</label>
                                                             <input
                                                                 type="text"
                                                                 value={draftAgent.name}
                                                                 onChange={e => setDraftAgent({ ...draftAgent, name: e.target.value })}
-                                                                className="w-full bg-zinc-950 border border-zinc-800 p-2 text-xs text-white focus:border-white focus:outline-none"
+                                                                className="w-full bg-zinc-950 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none"
                                                             />
                                                         </div>
                                                         <div className="space-y-1">
@@ -530,7 +622,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                                 type="text"
                                                                 value={draftAgent.description}
                                                                 onChange={e => setDraftAgent({ ...draftAgent, description: e.target.value })}
-                                                                className="w-full bg-zinc-950 border border-zinc-800 p-2 text-xs text-white focus:border-white focus:outline-none"
+                                                                className="w-full bg-zinc-950 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none"
                                                             />
                                                         </div>
                                                     </div>
@@ -542,59 +634,61 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                         </div>
                                                     ) : (
                                                         <>
-                                                            <div className="space-y-1">
+                                                            <div className="space-y-3">
                                                                 <label className="text-[10px] font-bold text-zinc-500 uppercase">Capabilities (Tools)</label>
-                                                                <div className="grid grid-cols-2 gap-2">
-                                                                    {CAPABILITIES.map(cap => {
-                                                                        const isEnabled = draftAgent.tools.includes("all") || cap.tools.every(t => draftAgent.tools.includes(t));
-                                                                        return (
-                                                                            <div
-                                                                                key={cap.id}
-                                                                                onClick={() => {
-                                                                                    if (draftAgent.tools.includes("all")) {
-                                                                                        // If all, switching to selective means we add ALL tools except this one? 
-                                                                                        // Or better, just clear "all" and add specific tools.
-                                                                                        // Complex logic. For MVP:
-                                                                                        // If switching OFF a capability while "all" is true -> Remove "all", add all defined tools MINUS this group.
-                                                                                        // But for simplicity of Phase 1, "Aurora" is "all". Others are specific.
-                                                                                        if (isEnabled) {
-                                                                                            // Disable
-                                                                                            // Replace "all" with all flattened tools minus this group
-                                                                                            const allToolsFlat = CAPABILITIES.flatMap(c => c.tools);
-                                                                                            const newTools = allToolsFlat.filter(t => !cap.tools.includes(t));
-                                                                                            setDraftAgent({ ...draftAgent, tools: newTools });
+                                                                <div className="grid grid-cols-2 gap-4">
+                                                                    {(() => {
+                                                                        // Merge Built-in Capabilities with Custom Tools
+                                                                        const customCaps = customTools.map(t => ({
+                                                                            id: t.name,
+                                                                            label: t.generalName || t.name,
+                                                                            description: t.description,
+                                                                            tools: [t.name],
+                                                                            isCustom: true
+                                                                        }));
+                                                                        const allCaps = [...CAPABILITIES, ...customCaps];
+
+                                                                        return allCaps.map(cap => {
+                                                                            const isEnabled = draftAgent.tools.includes("all") || cap.tools.every(t => draftAgent.tools.includes(t));
+                                                                            return (
+                                                                                <div
+                                                                                    key={cap.id}
+                                                                                    onClick={() => {
+                                                                                        if (draftAgent.tools.includes("all")) {
+                                                                                            // Complex logic for "all", simplifying to disable "all" and just toggle this one
+                                                                                            if (isEnabled) {
+                                                                                                const allToolsFlat = CAPABILITIES.flatMap(c => c.tools).concat(customTools.map(t => t.name));
+                                                                                                const newTools = allToolsFlat.filter(t => !cap.tools.includes(t));
+                                                                                                setDraftAgent({ ...draftAgent, tools: newTools });
+                                                                                            } else {
+                                                                                                setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
+                                                                                            }
                                                                                         } else {
-                                                                                            // Enable
-                                                                                            // Add these tools
-                                                                                            // If we now have ALL tools, maybe switch back to "all"? Optional.
-                                                                                            setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
+                                                                                            if (isEnabled) {
+                                                                                                const newTools = draftAgent.tools.filter((t: string) => !cap.tools.includes(t));
+                                                                                                setDraftAgent({ ...draftAgent, tools: newTools });
+                                                                                            } else {
+                                                                                                setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
+                                                                                            }
                                                                                         }
-                                                                                    } else {
-                                                                                        // Standard Toggle
-                                                                                        if (isEnabled) {
-                                                                                            // Remove
-                                                                                            const newTools = draftAgent.tools.filter((t: string) => !cap.tools.includes(t));
-                                                                                            setDraftAgent({ ...draftAgent, tools: newTools });
-                                                                                        } else {
-                                                                                            // Add
-                                                                                            setDraftAgent({ ...draftAgent, tools: [...draftAgent.tools, ...cap.tools] });
-                                                                                        }
-                                                                                    }
-                                                                                }}
-                                                                                className={`p-2 border cursor-pointer hover:border-zinc-500 transition-colors
-                                                                                    ${isEnabled
-                                                                                        ? 'bg-zinc-900 border-zinc-600'
-                                                                                        : 'bg-black border-zinc-800 opacity-50'
-                                                                                    }`}
-                                                                            >
-                                                                                <div className="flex items-center gap-2">
-                                                                                    <div className={`w-3 h-3 border ${isEnabled ? 'bg-green-500 border-green-500' : 'border-zinc-600'}`}></div>
-                                                                                    <span className="text-xs font-bold text-white">{cap.label}</span>
+                                                                                    }}
+                                                                                    className={`p-4 border cursor-pointer hover:border-zinc-500 transition-colors
+                                                                                        ${isEnabled
+                                                                                            ? 'bg-zinc-900 border-zinc-600'
+                                                                                            : 'bg-black border-zinc-800 opacity-50'
+                                                                                        }`}
+                                                                                >
+                                                                                    <div className="flex items-center gap-2">
+                                                                                        <div className={`w-3 h-3 border ${isEnabled ? 'bg-green-500 border-green-500' : 'border-zinc-600'}`}></div>
+                                                                                        <span className="text-xs font-bold text-white truncate">{cap.label}</span>
+                                                                                        {/* @ts-ignore */}
+                                                                                        {cap.isCustom && <span className="text-[9px] px-1 bg-zinc-800 text-zinc-400 rounded">CUSTOM</span>}
+                                                                                    </div>
+                                                                                    <p className="text-[9px] text-zinc-500 mt-1 pl-5 truncate">{cap.description}</p>
                                                                                 </div>
-                                                                                <p className="text-[9px] text-zinc-500 mt-1 pl-5">{cap.description}</p>
-                                                                            </div>
-                                                                        );
-                                                                    })}
+                                                                            );
+                                                                        });
+                                                                    })()}
                                                                 </div>
                                                             </div>
 
@@ -621,7 +715,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
 
                                 {/* CUSTOM TOOLS TAB */}
                                 {activeTab === 'custom_tools' && (
-                                    <div className="h-[600px] flex flex-col">
+                                    <div className="flex flex-col min-h-[600px]">
                                         {!draftTool ? (
                                             /* List View */
                                             <div className="space-y-4">
@@ -633,13 +727,20 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                         <p className="text-zinc-500 text-sm">Extend your agent with n8n workflows or webhooks.</p>
                                                     </div>
                                                     <button
-                                                        onClick={() => setDraftTool({
-                                                            name: "",
-                                                            description: "",
-                                                            url: "",
-                                                            method: "POST",
-                                                            inputSchema: { type: "object", properties: { input: { type: "string" } } }
-                                                        })}
+                                                        onClick={() => {
+                                                            const initialInput = { type: "object", properties: { input: { type: "string" } } };
+                                                            setDraftTool({
+                                                                name: "",
+                                                                generalName: "",
+                                                                description: "",
+                                                                url: "",
+                                                                method: "POST",
+                                                                inputSchema: initialInput,
+                                                                inputSchemaStr: JSON.stringify(initialInput, null, 2),
+                                                                outputSchemaStr: ""
+                                                            });
+                                                            setHeaderRows([{ id: 'h1', key: '', value: '' }]);
+                                                        }}
                                                         className="px-4 py-2 bg-white text-black font-bold text-xs uppercase flex items-center gap-2 hover:bg-zinc-200"
                                                     >
                                                         <Plus className="h-4 w-4" /> Create Tool
@@ -649,17 +750,33 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                                     {customTools.map((t: any) => (
                                                         <div key={t.name} className="p-4 bg-zinc-900 border border-zinc-800 hover:border-zinc-600 transition-all group relative">
-                                                            <div className="font-bold text-white mb-1">{t.name}</div>
+                                                            <div className="font-bold text-white mb-1 flex items-center gap-2">
+                                                                {t.generalName || t.name}
+                                                                {t.generalName && <span className="text-[9px] text-zinc-500 font-normal">({t.name})</span>}
+                                                            </div>
                                                             <div className="text-xs text-zinc-500 mb-2 h-8 overflow-hidden">{t.description}</div>
                                                             <div className="text-[10px] font-mono text-zinc-600 truncate">{t.url}</div>
-                                                            <button 
+                                                            <button
                                                                 onClick={() => handleDeleteTool(t.name)}
                                                                 className="absolute top-2 right-2 p-1 text-zinc-600 hover:text-red-500 opacity-0 group-hover:opacity-100"
                                                             >
                                                                 <Trash className="h-4 w-4" />
                                                             </button>
-                                                            <button 
-                                                                onClick={() => setDraftTool(t)}
+                                                            <button
+                                                                onClick={() => {
+                                                                    setDraftTool({
+                                                                        ...t,
+                                                                        inputSchemaStr: JSON.stringify(t.inputSchema || {}, null, 2),
+                                                                        outputSchemaStr: t.outputSchema ? JSON.stringify(t.outputSchema, null, 2) : ""
+                                                                    });
+                                                                    // Populate headers
+                                                                    const rows = Object.entries(t.headers || {}).map(([k, v], i) => ({
+                                                                        id: `h-${i}`,
+                                                                        key: k,
+                                                                        value: v as string
+                                                                    }));
+                                                                    setHeaderRows(rows.length ? rows : [{ id: 'h1', key: '', value: '' }]);
+                                                                }}
                                                                 className="absolute bottom-2 right-2 text-[10px] text-zinc-400 hover:text-white font-bold uppercase"
                                                             >
                                                                 Edit
@@ -687,13 +804,13 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                     </div>
                                                     <div className="flex gap-2">
                                                         <div className="flex bg-zinc-900 border border-zinc-800 p-1 rounded">
-                                                            <button 
+                                                            <button
                                                                 onClick={() => setToolBuilderMode('config')}
                                                                 className={`px-3 py-1 text-xs font-bold rounded ${toolBuilderMode === 'config' ? 'bg-zinc-700 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
                                                             >
                                                                 CONFIG
                                                             </button>
-                                                            <button 
+                                                            <button
                                                                 onClick={() => setToolBuilderMode('n8n')}
                                                                 className={`px-3 py-1 text-xs font-bold rounded ${toolBuilderMode === 'n8n' ? 'bg-[#ff6d5a] text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
                                                             >
@@ -707,84 +824,206 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                 </div>
 
                                                 {toolBuilderMode === 'config' ? (
-                                                    <div className="space-y-6 overflow-y-auto pr-2">
+                                                    <div className="space-y-6 pr-2">
                                                         <div className="grid grid-cols-2 gap-4">
                                                             <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Tool Name (Snake Case)</label>
-                                                                <input type="text" value={draftTool.name} onChange={e => setDraftTool({...draftTool, name: e.target.value})}
-                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono" placeholder="create_invoice" />
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">General Name</label>
+                                                                <input type="text" value={draftTool.generalName || ''} onChange={e => {
+                                                                    const val = e.target.value;
+                                                                    const update: any = { ...draftTool, generalName: val };
+                                                                    // Auto-fill snake_case functionality
+                                                                    if (!draftTool.name) {
+                                                                        update.name = val.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+                                                                    }
+                                                                    setDraftTool(update);
+                                                                }}
+                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none placeholder:text-zinc-700"
+                                                                    placeholder="e.g. Create Jira Ticket" />
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">System Name (Snake Case)</label>
+                                                                <input type="text" value={draftTool.name} onChange={e => setDraftTool({ ...draftTool, name: e.target.value })}
+                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono placeholder:text-zinc-700" placeholder="e.g. create_jira_ticket" />
                                                             </div>
                                                             <div className="space-y-1">
                                                                 <label className="text-[10px] uppercase font-bold text-zinc-500">Method</label>
-                                                                <select value={draftTool.method} onChange={e => setDraftTool({...draftTool, method: e.target.value})}
+                                                                <select value={draftTool.method} onChange={e => setDraftTool({ ...draftTool, method: e.target.value })}
                                                                     className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none">
                                                                     <option>POST</option>
                                                                     <option>GET</option>
                                                                 </select>
                                                             </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Description (For AI)</label>
+                                                                <input type="text" value={draftTool.description} onChange={e => setDraftTool({ ...draftTool, description: e.target.value })}
+                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none"
+                                                                    placeholder="What does this tool do?" />
+                                                            </div>
                                                         </div>
 
                                                         <div className="space-y-1">
-                                                            <label className="text-[10px] uppercase font-bold text-zinc-500">Description (For AI)</label>
-                                                            <input type="text" value={draftTool.description} onChange={e => setDraftTool({...draftTool, description: e.target.value})}
-                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none" 
-                                                                placeholder="Creates an invoice in Xero given an amount and email." />
-                                                        </div>
-
-                                                        <div className="space-y-1">
-                                                            <label className="text-[10px] uppercase font-bold text-zinc-500">Webhook URL</label>
-                                                            <input type="text" value={draftTool.url} onChange={e => setDraftTool({...draftTool, url: e.target.value})}
-                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-[#ff6d5a] focus:border-[#ff6d5a] focus:outline-none font-mono" 
+                                                            <div className="flex items-center gap-2">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Webhook URL</label>
+                                                                <div className="group relative">
+                                                                    <svg className="w-3.5 h-3.5 text-zinc-600 hover:text-[#ff6d5a] cursor-help" fill="currentColor" viewBox="0 0 20 20">
+                                                                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                                                                    </svg>
+                                                                    {/* Tooltip */}
+                                                                    <div className="invisible group-hover:visible absolute left-0 top-6 w-72 p-3 bg-zinc-900 border border-zinc-700 text-[10px] text-zinc-300 z-50 shadow-xl">
+                                                                        <p className="font-bold text-[#ff6d5a] mb-2">💡 Quick Setup:</p>
+                                                                        <ol className="list-decimal list-inside space-y-1 pl-1">
+                                                                            <li>Click <span className="font-bold">n8n BUILDER</span> tab</li>
+                                                                            <li>Add <span className="font-mono bg-zinc-800 px-1">Webhook</span> node</li>
+                                                                            <li>Set webhook path</li>
+                                                                            <li>Build workflow &amp; Save</li>
+                                                                            <li>URL auto-populates here!</li>
+                                                                        </ol>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            <input type="text" value={draftTool.url} onChange={e => setDraftTool({ ...draftTool, url: e.target.value })}
+                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono"
                                                                 placeholder="http://localhost:5678/webhook/..." />
-                                                            <p className="text-[10px] text-zinc-600">
-                                                                Copy this from the "Webhook" node in the n8n Builder tab.
-                                                            </p>
                                                         </div>
 
+                                                        <div className="space-y-2 pt-2">
+                                                            <div className="flex justify-between items-end mb-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Headers</label>
+                                                                <button
+                                                                    onClick={() => setHeaderRows([...headerRows, { id: `h-${Date.now()}`, key: '', value: '' }])}
+                                                                    className="text-[10px] text-zinc-400 hover:text-white font-bold bg-zinc-800 px-2 py-1 rounded transition-colors"
+                                                                >
+                                                                    + ADD HEADER
+                                                                </button>
+                                                            </div>
+                                                            {headerRows.map((row, idx) => (
+                                                                <div key={row.id} className="flex gap-2 items-center">
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="Key (e.g. Authorization)"
+                                                                        value={row.key}
+                                                                        onChange={e => {
+                                                                            const newRows = [...headerRows];
+                                                                            newRows[idx].key = e.target.value;
+                                                                            setHeaderRows(newRows);
+                                                                        }}
+                                                                        className="flex-1 bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono"
+                                                                    />
+                                                                    <input
+                                                                        type="text"
+                                                                        placeholder="Value"
+                                                                        value={row.value}
+                                                                        onChange={e => {
+                                                                            const newRows = [...headerRows];
+                                                                            newRows[idx].value = e.target.value;
+                                                                            setHeaderRows(newRows);
+                                                                        }}
+                                                                        className="flex-1 bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono"
+                                                                    />
+                                                                    <button
+                                                                        onClick={() => setHeaderRows(headerRows.filter(r => r.id !== row.id))}
+                                                                        className="p-2 text-zinc-600 hover:text-red-500 transition-colors"
+                                                                    >
+                                                                        <Trash className="h-4 w-4" />
+                                                                    </button>
+                                                                </div>
+                                                            ))}
+                                                        </div>
                                                         <div className="grid grid-cols-2 gap-4 flex-1 min-h-0">
-                                                            <div className="space-y-1 flex flex-col">
+                                                            <div className="space-y-1 flex flex-col min-h-[280px]">
                                                                 <label className="text-[10px] uppercase font-bold text-zinc-500">Input Schema (JSON)</label>
-                                                                <textarea 
-                                                                    value={JSON.stringify(draftTool.inputSchema, null, 2)}
-                                                                    onChange={e => {
-                                                                        try {
-                                                                            const parsed = JSON.parse(e.target.value);
-                                                                            setDraftTool({...draftTool, inputSchema: parsed});
-                                                                        } catch(err) {}
-                                                                    }}
+                                                                <textarea
+                                                                    value={draftTool.inputSchemaStr}
+                                                                    onChange={e => setDraftTool({ ...draftTool, inputSchemaStr: e.target.value })}
                                                                     className="w-full flex-1 bg-zinc-950 border border-zinc-800 p-3 text-[10px] font-mono text-zinc-300 focus:border-white focus:outline-none resize-none"
                                                                     placeholder='{"type": "object", "properties": {"msg": {"type": "string"}}}'
                                                                 />
                                                             </div>
-                                                            <div className="space-y-1 flex flex-col">
+                                                            <div className="space-y-1 flex flex-col min-h-[280px]">
                                                                 <label className="text-[10px] uppercase font-bold text-zinc-500">Output Schema (JSON)</label>
-                                                                <textarea 
-                                                                    value={draftTool.outputSchema ? JSON.stringify(draftTool.outputSchema, null, 2) : ""}
-                                                                    onChange={e => {
-                                                                        try {
-                                                                            const parsed = JSON.parse(e.target.value);
-                                                                            setDraftTool({...draftTool, outputSchema: parsed});
-                                                                        } catch(err) {}
-                                                                    }}
-                                                                    className="w-full flex-1 bg-zinc-900 border border-zinc-800 p-3 text-[10px] font-mono text-zinc-400 focus:border-white focus:outline-none resize-none"
+                                                                <textarea
+                                                                    value={draftTool.outputSchemaStr}
+                                                                    onChange={e => setDraftTool({ ...draftTool, outputSchemaStr: e.target.value })}
+                                                                    className="w-full flex-1 bg-zinc-900 border border-zinc-800 p-3 text-[10px] font-mono text-zinc-300 focus:border-white focus:outline-none resize-none"
                                                                     placeholder='(Optional) {"properties": {"id": {"type": "string"}}} - Filters response to these keys.'
                                                                 />
                                                             </div>
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <div className="flex-1 bg-white relative overflow-hidden border border-zinc-800">
-                                                        <div className="absolute inset-0 flex items-center justify-center text-black/50 z-0">
-                                                            <div className="text-center">
-                                                                <p className="font-bold">Loading n8n Editor...</p>
-                                                                <p className="text-xs">Ensure n8n is running at http://localhost:5678</p>
+                                                    <div className="h-[600px] bg-white relative overflow-hidden border border-zinc-800">
+                                                        {/* Workflow ID Display - Bottom Left */}
+                                                        {draftTool.workflowId && (
+                                                            <div className="absolute bottom-4 left-4 z-20 flex items-center gap-2 bg-zinc-900 border border-zinc-700 p-1.5 rounded shadow-lg">
+                                                                <div className="px-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">ID:</div>
+                                                                <code className="text-xs text-white font-mono">{draftTool.workflowId}</code>
+                                                                <button
+                                                                    onClick={() => navigator.clipboard.writeText(draftTool.workflowId || '')}
+                                                                    className="p-1 hover:bg-zinc-800 text-zinc-400 hover:text-white rounded"
+                                                                    title="Copy ID"
+                                                                >
+                                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                                                                </button>
                                                             </div>
-                                                        </div>
-                                                        <iframe 
-                                                            src="http://localhost:5678/" 
-                                                            className="absolute inset-0 w-full h-full z-10"
-                                                            title="n8n Editor"
-                                                        />
+                                                        )}
+
+
+                                                        {/* Fullscreen Toggle Button - Bottom Right */}
+                                                        <button
+                                                            onClick={() => setIsIframeFullscreen(!isIframeFullscreen)}
+                                                            className="absolute bottom-4 right-4 z-20 p-2 bg-zinc-900 hover:bg-zinc-800 text-white rounded border border-zinc-700 flex items-center gap-2 text-xs font-bold shadow-lg"
+                                                            title={isIframeFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                                                        >
+                                                            {isIframeFullscreen ? (
+                                                                <>
+                                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                                                    </svg>
+                                                                    Exit Fullscreen
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                                                                    </svg>
+                                                                    Fullscreen
+                                                                </>
+                                                            )}
+                                                        </button>
+
+                                                        {/* Loading message - only show when not fullscreen */}
+                                                        {!isIframeFullscreen && isN8nLoading && (
+                                                            <div className="absolute inset-0 flex items-center justify-center text-black/50 z-0">
+                                                                <div className="text-center">
+                                                                    <p className="font-bold">Loading n8n Editor...</p>
+                                                                    <p className="text-xs">Ensure n8n is running at http://localhost:5678</p>
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        {/* n8n iframe - normal view */}
+                                                        {!isIframeFullscreen && (
+                                                            <iframe
+                                                                onLoad={() => setIsN8nLoading(false)}
+                                                                src={
+                                                                    (() => {
+                                                                        if (draftTool?.workflowId) return `http://localhost:5678/workflow/${draftTool.workflowId}`;
+
+                                                                        // Fallback: Try to infer or default
+                                                                        if (draftTool?.url && draftTool.url.includes('webhook')) {
+                                                                            // Could try regex match here if needed, but 'new' is safest
+                                                                            return `http://localhost:5678/home/workflows`;
+                                                                        }
+                                                                        return "http://localhost:5678/workflow/new";
+                                                                    })()
+                                                                }
+                                                                ref={n8nIframeRef}
+                                                                className="w-full h-full z-10"
+                                                                title="n8n Editor"
+                                                                allow="clipboard-read; clipboard-write"
+                                                                sandbox="allow-forms allow-modals allow-popups allow-presentation allow-same-origin allow-scripts"
+                                                            />
+                                                        )}
                                                     </div>
                                                 )}
                                             </div>
@@ -880,7 +1119,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                     <div className="space-y-8">
                                         <div className="space-y-4">
                                             <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Operation Mode</label>
-                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                                 <label className={`relative flex flex-col p-4 cursor-pointer border transition-all duration-200
                                                     ${mode === 'local'
                                                         ? 'bg-zinc-900 border-white ring-1 ring-white/20'
@@ -931,6 +1170,29 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                         </div>
                                                     )}
                                                 </label>
+
+                                                <label className={`relative flex flex-col p-4 cursor-pointer border transition-all duration-200
+                                                    ${mode === 'bedrock'
+                                                        ? 'bg-zinc-900 border-white ring-1 ring-white/20'
+                                                        : 'bg-zinc-950 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/50'}`}>
+                                                    <input
+                                                        type="radio"
+                                                        name="mode"
+                                                        value="bedrock"
+                                                        checked={mode === 'bedrock'}
+                                                        onChange={() => {
+                                                            setMode('bedrock');
+                                                            const bedrockModels = cloudModels.filter(m => m.startsWith('bedrock'));
+                                                            if (bedrockModels.length > 0 && !bedrockModels.includes(selectedModel)) setSelectedModel(bedrockModels[0]);
+                                                        }}
+                                                        className="sr-only"
+                                                    />
+                                                    <div className="flex items-center gap-2 mb-2">
+                                                        <Database className={`h-5 w-5 ${mode === 'bedrock' ? 'text-white' : 'text-zinc-500'}`} />
+                                                        <span className={`font-bold ${mode === 'bedrock' ? 'text-white' : 'text-zinc-400'}`}>AWS Bedrock</span>
+                                                    </div>
+                                                    <p className="text-xs text-zinc-500 leading-relaxed">Enterprise-grade models via AWS. Requires AWS Access Key & Secret.</p>
+                                                </label>
                                             </div>
                                         </div>
 
@@ -979,27 +1241,37 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                     <input type="password" value={geminiKey} onChange={e => setGeminiKey(e.target.value)}
                                                         className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="AIza..." />
                                                 </div>
-                                                
-                                                <div className="pt-4 border-t border-zinc-800/50 space-y-4">
-                                                    <h4 className="text-xs font-bold text-white uppercase">AWS Bedrock Configuration</h4>
-                                                    <div className="space-y-2">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Access Key ID</label>
-                                                        <input type="password" value={awsAccessKey} onChange={e => setAwsAccessKey(e.target.value)}
-                                                            className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="AKIA..." />
-                                                    </div>
-                                                    <div className="space-y-2">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Secret Access Key</label>
-                                                        <input type="password" value={awsSecretKey} onChange={e => setAwsSecretKey(e.target.value)}
-                                                            className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="Secret Key..." />
-                                                    </div>
-                                                    <div className="space-y-2">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Region</label>
-                                                        <input type="text" value={awsRegion} onChange={e => setAwsRegion(e.target.value)}
-                                                            className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="us-east-1" />
-                                                    </div>
+                                            </div>
+                                        )}
+
+                                        {mode === 'bedrock' && (
+                                            <div className="space-y-6 pt-6 border-t border-zinc-800/50">
+                                                <h3 className="text-sm font-bold text-white mb-4">AWS Bedrock Configuration</h3>
+                                                <div className="space-y-2">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Access Key ID</label>
+                                                    <input type="password" value={awsAccessKey} onChange={e => setAwsAccessKey(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="AKIA..." />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Secret Access Key</label>
+                                                    <input type="password" value={awsSecretKey} onChange={e => setAwsSecretKey(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="..." />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Region</label>
+                                                    <input type="text" value={awsRegion} onChange={e => setAwsRegion(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="us-east-1" />
                                                 </div>
                                             </div>
                                         )}
+                                        <div className="pt-4 flex justify-end">
+                                            <button
+                                                onClick={handleSaveSection}
+                                                className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-lg"
+                                            >
+                                                Save Changes
+                                            </button>
+                                        </div>
                                     </div>
                                 )}
 
@@ -1140,17 +1412,25 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                     placeholder="postgresql://user:password@localhost:5432/dbname"
                                                 />
                                                 <p className="text-xs text-zinc-600">
-                                                    Format: <code>dialect+driver://username:password@host:port/database</code><br/>
-                                                    Examples:<br/>
-                                                    - Postgres: <code>postgresql://scott:tiger@localhost/test</code><br/>
-                                                    - MySQL: <code>mysql+pymysql://user:pass@localhost/foo</code><br/>
+                                                    Format: <code>dialect+driver://username:password@host:port/database</code><br />
+                                                    Examples:<br />
+                                                    - Postgres: <code>postgresql://scott:tiger@localhost/test</code><br />
+                                                    - MySQL: <code>mysql+pymysql://user:pass@localhost/foo</code><br />
                                                     - SQLite: <code>sqlite:///foo.db</code>
                                                 </p>
                                             </div>
-                                            
+
                                             <div className="p-4 bg-zinc-900/50 border border-zinc-800 text-xs text-zinc-400">
                                                 <strong>Security Note:</strong> The agent will have access to execute queries. Use a read-only user if possible.
                                             </div>
+                                        </div>
+                                        <div className="pt-4 flex justify-end">
+                                            <button
+                                                onClick={handleSaveSection}
+                                                className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-lg"
+                                            >
+                                                Save Changes
+                                            </button>
                                         </div>
                                     </div>
                                 )}
@@ -1196,64 +1476,83 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
 
                         {/* Footer Content Actions */}
                         {/* FIXED: Changed bg-black/50 to bg-zinc-950 for consistent solid background */}
-                        <div className="p-6 border-t border-white/10 bg-zinc-950 flex justify-end gap-4 shrink-0">
-                            <button
-                                onClick={onClose}
-                                className="px-6 py-2.5 text-sm font-medium border border-zinc-700 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={() => {
-                                    onSave(agentName, selectedModel, mode, { 
-                                        openai_key: openaiKey, 
-                                        anthropic_key: anthropicKey, 
-                                        gemini_key: geminiKey, 
-                                        aws_access_key_id: awsAccessKey,
-                                        aws_secret_access_key: awsSecretKey,
-                                        aws_region: awsRegion,
-                                        sql_connection_string: sqlConnectionString,
-                                        show_browser: showBrowser 
-                                    });
-                                    onClose();
-                                }}
-                                className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:shadow-[0_0_25px_rgba(255,255,255,0.2)]"
-                            >
-                                Save Changes
-                            </button>
-                        </div>
+                        {/* Footer Removed - Per-section save applied */}
                     </div>
                 </div>
-            </div>
+            </div >
+
+            {/* Toast Notification */}
+            {
+                showToast && (
+                    <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100] bg-green-500 text-black px-6 py-2 rounded-full shadow-2xl font-bold text-xs uppercase animate-in fade-in slide-in-from-top-4 duration-300 flex items-center gap-2">
+                        <div className="h-2 w-2 bg-black rounded-full animate-pulse"></div>
+                        Configuration Saved
+                    </div>
+                )
+            }
+
 
             {/* Custom Confirmation Modal */}
-            {confirmAction && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200 font-mono">
-                    <div className="w-full max-w-sm border border-red-500/30 bg-black shadow-[0_0_50px_rgba(255,0,0,0.1)] p-6 relative overflow-hidden">
-                        <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-transparent via-red-500 to-transparent opacity-50"></div>
-                        <h3 className="text-lg font-bold text-red-500 mb-4 flex items-center gap-2">
-                            <Shield className="h-5 w-5" /> CONFIRM DELETION
-                        </h3>
-                        <p className="text-sm text-zinc-300 mb-8 leading-relaxed">
-                            {confirmAction.message}
-                        </p>
-                        <div className="flex justify-end gap-3">
-                            <button
-                                onClick={() => setConfirmAction(null)}
-                                className="px-4 py-2 text-xs font-medium border border-zinc-800 hover:bg-zinc-900 text-zinc-400 hover:text-white transition-colors"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={executeClearHistory}
-                                className="px-4 py-2 text-xs bg-red-900/20 border border-red-900/50 text-red-500 hover:bg-red-900/40 hover:text-red-400 font-bold transition-colors"
-                            >
-                                Yes, Delete It
-                            </button>
+            {
+                confirmAction && (
+                    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200 font-mono">
+                        <div className="w-full max-w-sm border border-red-500/30 bg-black shadow-[0_0_50px_rgba(255,0,0,0.1)] p-6 relative overflow-hidden">
+                            <div className="absolute top-0 inset-x-0 h-1 bg-gradient-to-r from-transparent via-red-500 to-transparent opacity-50"></div>
+                            <h3 className="text-lg font-bold text-red-500 mb-4 flex items-center gap-2">
+                                <Shield className="h-5 w-5" /> CONFIRM DELETION
+                            </h3>
+                            <p className="text-sm text-zinc-300 mb-8 leading-relaxed">
+                                {confirmAction.message}
+                            </p>
+                            <div className="flex justify-end gap-3">
+                                <button
+                                    onClick={() => setConfirmAction(null)}
+                                    className="px-4 py-2 text-xs font-medium border border-zinc-800 hover:bg-zinc-900 text-zinc-400 hover:text-white transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={executeClearHistory}
+                                    className="px-4 py-2 text-xs bg-red-900/20 border border-red-900/50 text-red-500 hover:bg-red-900/40 hover:text-red-400 font-bold transition-colors"
+                                >
+                                    Yes, Delete It
+                                </button>
+                            </div>
                         </div>
                     </div>
-                </div>
-            )}
+                )
+            }
+
+            {/* Fullscreen n8n Iframe Overlay - Rendered outside modal to avoid clipping */}
+            {
+                isIframeFullscreen && toolBuilderMode === 'n8n' && draftTool && (
+                    <div className="fixed inset-0 z-[200] bg-white">
+                        {/* Exit Fullscreen Button - Bottom position */}
+                        <button
+                            onClick={() => setIsIframeFullscreen(false)}
+                            className="absolute bottom-4 right-4 z-[210] p-3 bg-zinc-900 hover:bg-zinc-800 text-white rounded border border-zinc-700 flex items-center gap-2 text-sm font-bold shadow-2xl"
+                        >
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                            Exit Fullscreen
+                        </button>
+
+                        {/* Fullscreen iframe */}
+                        <iframe
+                            src={
+                                draftTool?.url && draftTool.url.includes('webhook')
+                                    ? `http://localhost:5678/workflow/new`
+                                    : "http://localhost:5678/workflow/new"
+                            }
+                            className="w-full h-full"
+                            title="n8n Editor Fullscreen"
+                            allow="clipboard-read; clipboard-write"
+                            sandbox="allow-forms allow-modals allow-popups allow-presentation allow-same-origin allow-scripts"
+                        />
+                    </div>
+                )
+            }
         </>
     );
 };
