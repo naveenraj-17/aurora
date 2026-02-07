@@ -1,11 +1,16 @@
 import chromadb
-import ollama
+from typing import Callable, Optional
 import uuid
 import os
 import json
 
 class MemoryStore:
-    def __init__(self, storage_path="chroma_db", model="llama3"):
+    def __init__(
+        self,
+        storage_path="chroma_db",
+        model="llama3",
+        embed_fn: Optional[Callable[[str], list[float] | None]] = None,
+    ):
         # Initialize ChromaDB
         # We use a persistent client so data survives restarts
         self.storage_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "chroma_db")
@@ -15,11 +20,20 @@ class MemoryStore:
         self.client = chromadb.PersistentClient(path=self.storage_path)
         self.collection = self.client.get_or_create_collection(name="chat_history")
         self.model = model
+        self._embed_fn = embed_fn
         print(f"DEBUG: MemoryStore initialized at {self.storage_path} with model {self.model}")
 
     def get_embedding(self, text):
+        if self._embed_fn:
+            try:
+                return self._embed_fn(text)
+            except Exception as e:
+                print(f"Error getting embedding from configured provider: {e}")
+                return None
         try:
-            # Use Ollama for embeddings
+            # Default: Use Ollama for embeddings (best-effort)
+            import ollama
+
             response = ollama.embeddings(model=self.model, prompt=text)
             return response["embedding"]
         except Exception as e:

@@ -1,10 +1,13 @@
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+/* eslint-disable react/no-unescaped-entities */
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useRef } from 'react';
 import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save, Wrench, ExternalLink } from 'lucide-react';
 
 interface SettingsModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSave: (name: string, model: string, mode: string, keys: any) => void;
+    onSave: (name: string, model: string, mode: string, keys: any) => void | Promise<void>;
     credentials?: any;
     showBrowser: boolean;
     onToggleBrowser: (val: boolean) => void;
@@ -72,10 +75,16 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     const [openaiKey, setOpenaiKey] = useState('');
     const [anthropicKey, setAnthropicKey] = useState('');
     const [geminiKey, setGeminiKey] = useState('');
-    const [awsAccessKey, setAwsAccessKey] = useState('');
-    const [awsSecretKey, setAwsSecretKey] = useState('');
+    const [bedrockApiKey, setBedrockApiKey] = useState('');
     const [awsRegion, setAwsRegion] = useState('us-east-1');
+    const [bedrockInferenceProfile, setBedrockInferenceProfile] = useState('');
+    const [bedrockInferenceProfiles, setBedrockInferenceProfiles] = useState<Array<{ id: string; arn: string; name: string; status?: string }>>([]);
+    const [loadingInferenceProfiles, setLoadingInferenceProfiles] = useState(false);
     const [sqlConnectionString, setSqlConnectionString] = useState('');
+
+    // Integrations: n8n
+    const [n8nUrl, setN8nUrl] = useState('http://localhost:5678');
+    const [n8nApiKey, setN8nApiKey] = useState('');
 
     // Agents State
     const [agents, setAgents] = useState<any[]>([]);
@@ -90,17 +99,61 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     const [headerRows, setHeaderRows] = useState<{ id: string, key: string, value: string }[]>([]);
     const [showToast, setShowToast] = useState(false);
 
-    const handleSaveSection = () => {
-        onSave(agentName, selectedModel, mode, {
+    // n8n workflows (for Tool Builder dropdown)
+    const [n8nWorkflows, setN8nWorkflows] = useState<any[]>([]);
+    const [n8nWorkflowsLoading, setN8nWorkflowsLoading] = useState(false);
+
+    const refreshBedrockModels = async () => {
+        setLoadingModels(true);
+        try {
+            const res = await fetch('/api/bedrock/models');
+            const data = await res.json();
+            const bedrock = Array.isArray(data.models) ? data.models : [];
+            if (bedrock.length > 0) {
+                setCloudModels(prev => {
+                    const nonBedrock = (prev || []).filter((m: string) => !m.startsWith('bedrock.'));
+                    return [...nonBedrock, ...bedrock];
+                });
+            }
+        } catch {
+            // ignore
+        } finally {
+            setLoadingModels(false);
+        }
+    };
+
+    const refreshBedrockInferenceProfiles = async () => {
+        setLoadingInferenceProfiles(true);
+        try {
+            const res = await fetch('/api/bedrock/inference-profiles');
+            const data = await res.json();
+            const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+            setBedrockInferenceProfiles(profiles);
+        } catch {
+            setBedrockInferenceProfiles([]);
+        } finally {
+            setLoadingInferenceProfiles(false);
+        }
+    };
+
+    const handleSaveSection = async () => {
+        await Promise.resolve(onSave(agentName, selectedModel, mode, {
             openai_key: openaiKey,
             anthropic_key: anthropicKey,
             gemini_key: geminiKey,
-            aws_access_key_id: awsAccessKey,
-            aws_secret_access_key: awsSecretKey,
+            bedrock_api_key: bedrockApiKey,
+            bedrock_inference_profile: bedrockInferenceProfile,
             aws_region: awsRegion,
             sql_connection_string: sqlConnectionString,
+            n8n_url: n8nUrl,
+            n8n_api_key: n8nApiKey,
             show_browser: showBrowser
-        });
+        }));
+
+        if (mode === 'bedrock') {
+            await refreshBedrockModels();
+            await refreshBedrockInferenceProfiles();
+        }
         setShowToast(true);
         setTimeout(() => setShowToast(false), 3000);
     };
@@ -146,6 +199,8 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
 
     const fetchDatasets = () => fetch('/api/synthetic/datasets').then(r => r.json()).then(setDlDatasets).catch(() => { });
     const fetchStatus = () => fetch('/api/synthetic/status').then(r => r.json()).then(setDlStatus).catch(() => { });
+
+    const getN8nBaseUrl = () => (n8nUrl || 'http://localhost:5678').replace(/\/+$/, '');
 
     const handleGenerateData = async () => {
         if (!dlTopic) return alert("Please enter a topic.");
@@ -225,10 +280,12 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                     setOpenaiKey(data.openai_key || '');
                     setAnthropicKey(data.anthropic_key || '');
                     setGeminiKey(data.gemini_key || '');
-                    setAwsAccessKey(data.aws_access_key_id || '');
-                    setAwsSecretKey(data.aws_secret_access_key || '');
+                    setBedrockApiKey(data.bedrock_api_key || '');
                     setAwsRegion(data.aws_region || 'us-east-1');
+                    setBedrockInferenceProfile(data.bedrock_inference_profile || '');
                     setSqlConnectionString(data.sql_connection_string || '');
+                    setN8nUrl(data.n8n_url || 'http://localhost:5678');
+                    setN8nApiKey(data.n8n_api_key || '');
                 });
 
             // Get models
@@ -257,6 +314,26 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                 });
         }
     }, [isOpen]);
+
+    // Refresh Bedrock models dynamically when switching into bedrock mode.
+    useEffect(() => {
+        if (!isOpen) return;
+        if (mode !== 'bedrock') return;
+
+        refreshBedrockModels();
+        refreshBedrockInferenceProfiles();
+    }, [isOpen, mode]);
+
+    // Fetch n8n workflows when the Tool Builder is open (for dropdown)
+    useEffect(() => {
+        if (!isOpen) return;
+        if (activeTab !== 'custom_tools') return;
+        if (!draftTool) return;
+        if (toolBuilderMode !== 'config') return;
+        if (n8nWorkflows.length > 0) return;
+        fetchN8nWorkflows();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isOpen, activeTab, draftTool, toolBuilderMode]);
 
     // Handle Save Custom Tool
     const handleSaveTool = async () => {
@@ -315,7 +392,8 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                 body: JSON.stringify(payload)
             });
             if (res.ok) {
-                const saved = await res.json();
+                const savedResp = await res.json();
+                const saved = savedResp?.tool ?? savedResp;
                 // Refresh list
                 const idx = customTools.findIndex((t: any) => t.name === draftTool.name);
                 if (idx >= 0) {
@@ -333,6 +411,24 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
             }
         } catch (e) {
             alert("Error saving tool.");
+        }
+    };
+
+    const fetchN8nWorkflows = async () => {
+        if (n8nWorkflowsLoading) return;
+        setN8nWorkflowsLoading(true);
+        try {
+            const res = await fetch('/api/n8n/workflows');
+            if (!res.ok) {
+                setN8nWorkflows([]);
+                return;
+            }
+            const data = await res.json();
+            setN8nWorkflows(Array.isArray(data) ? data : []);
+        } catch {
+            setN8nWorkflows([]);
+        } finally {
+            setN8nWorkflowsLoading(false);
         }
     };
 
@@ -402,7 +498,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
         { id: 'custom_tools', label: 'Tool Builder', icon: Wrench },
         { id: 'datalab', label: 'Data Lab', icon: Database },
         { id: 'models', label: 'Models', icon: Cpu },
-        { id: 'workspace', label: 'Google Workspace', icon: Cloud },
+        { id: 'workspace', label: 'Integrations', icon: Cloud },
         { id: 'database', label: 'Database', icon: Database },
         { id: 'memory', label: 'Memory', icon: Trash }, // Icon change for memory to differentiate? Keeping Database for Data Lab.
     ];
@@ -862,6 +958,40 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                         </div>
 
                                                         <div className="space-y-1">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-500">n8n Workflow</label>
+                                                            <select
+                                                                value={draftTool.workflowId || ''}
+                                                                onChange={async (e) => {
+                                                                    const workflowId = e.target.value;
+                                                                    setDraftTool({ ...draftTool, workflowId });
+                                                                    setN8nWorkflowId(workflowId || null);
+                                                                    if (!workflowId) return;
+                                                                    try {
+                                                                        const res = await fetch(`/api/n8n/workflows/${workflowId}/webhook`);
+                                                                        if (!res.ok) return;
+                                                                        const data = await res.json();
+                                                                        if (data?.productionUrl) {
+                                                                            setDraftTool({ ...draftTool, workflowId, url: data.productionUrl });
+                                                                        }
+                                                                    } catch {
+                                                                        // ignore
+                                                                    }
+                                                                }}
+                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none"
+                                                            >
+                                                                <option value="">{n8nWorkflowsLoading ? 'Loading workflows...' : 'Select a workflow (optional)'}</option>
+                                                                {Array.isArray(n8nWorkflows) && n8nWorkflows.map((w: any) => (
+                                                                    <option key={String(w.id)} value={String(w.id)}>
+                                                                        {w.name || w.id}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                            <p className="text-[10px] text-zinc-600">
+                                                                Configure n8n in Integrations to enable workflow listing.
+                                                            </p>
+                                                        </div>
+
+                                                        <div className="space-y-1">
                                                             <div className="flex items-center gap-2">
                                                                 <label className="text-[10px] uppercase font-bold text-zinc-500">Webhook URL</label>
                                                                 <div className="group relative">
@@ -996,7 +1126,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                             <div className="absolute inset-0 flex items-center justify-center text-black/50 z-0">
                                                                 <div className="text-center">
                                                                     <p className="font-bold">Loading n8n Editor...</p>
-                                                                    <p className="text-xs">Ensure n8n is running at http://localhost:5678</p>
+                                                                    <p className="text-xs">Ensure n8n is running at {getN8nBaseUrl()}</p>
                                                                 </div>
                                                             </div>
                                                         )}
@@ -1007,14 +1137,9 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                                 onLoad={() => setIsN8nLoading(false)}
                                                                 src={
                                                                     (() => {
-                                                                        if (draftTool?.workflowId) return `http://localhost:5678/workflow/${draftTool.workflowId}`;
-
-                                                                        // Fallback: Try to infer or default
-                                                                        if (draftTool?.url && draftTool.url.includes('webhook')) {
-                                                                            // Could try regex match here if needed, but 'new' is safest
-                                                                            return `http://localhost:5678/home/workflows`;
-                                                                        }
-                                                                        return "http://localhost:5678/workflow/new";
+                                                                        const base = getN8nBaseUrl();
+                                                                        if (draftTool?.workflowId) return `${base}/workflow/${draftTool.workflowId}`;
+                                                                        return `${base}/workflow/new`;
                                                                     })()
                                                                 }
                                                                 ref={n8nIframeRef}
@@ -1191,7 +1316,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                         <Database className={`h-5 w-5 ${mode === 'bedrock' ? 'text-white' : 'text-zinc-500'}`} />
                                                         <span className={`font-bold ${mode === 'bedrock' ? 'text-white' : 'text-zinc-400'}`}>AWS Bedrock</span>
                                                     </div>
-                                                    <p className="text-xs text-zinc-500 leading-relaxed">Enterprise-grade models via AWS. Requires AWS Access Key & Secret.</p>
+                                                    <p className="text-xs text-zinc-500 leading-relaxed">Enterprise-grade models via AWS. Uses a Bedrock API key (ABSK...) and Region.</p>
                                                 </label>
                                             </div>
                                         </div>
@@ -1248,19 +1373,40 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                             <div className="space-y-6 pt-6 border-t border-zinc-800/50">
                                                 <h3 className="text-sm font-bold text-white mb-4">AWS Bedrock Configuration</h3>
                                                 <div className="space-y-2">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Access Key ID</label>
-                                                    <input type="password" value={awsAccessKey} onChange={e => setAwsAccessKey(e.target.value)}
-                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="AKIA..." />
-                                                </div>
-                                                <div className="space-y-2">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Secret Access Key</label>
-                                                    <input type="password" value={awsSecretKey} onChange={e => setAwsSecretKey(e.target.value)}
-                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="..." />
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-500">Bedrock API Key</label>
+                                                    <input type="password" value={bedrockApiKey} onChange={e => setBedrockApiKey(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="ABSK..." />
+                                                    <p className="text-[10px] text-zinc-500 leading-relaxed">Paste the raw key (starts with ABSK...). You can also paste "Bearer ABSK..." and it will be normalized.</p>
                                                 </div>
                                                 <div className="space-y-2">
                                                     <label className="text-[10px] uppercase font-bold text-zinc-500">AWS Region</label>
                                                     <input type="text" value={awsRegion} onChange={e => setAwsRegion(e.target.value)}
                                                         className="w-full bg-zinc-900 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none transition-colors" placeholder="us-east-1" />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-500">Inference Profile (Optional)</label>
+                                                    <select
+                                                        value={bedrockInferenceProfile}
+                                                        onChange={(e) => setBedrockInferenceProfile(e.target.value)}
+                                                        className="w-full appearance-none bg-zinc-900 border border-zinc-800 p-3 text-xs focus:border-white focus:outline-none transition-colors text-white cursor-pointer"
+                                                    >
+                                                        <option value="">None (on-demand)</option>
+                                                        {loadingInferenceProfiles ? (
+                                                            <option value="" disabled>Loading inference profiles...</option>
+                                                        ) : (
+                                                            bedrockInferenceProfiles.map((p) => {
+                                                                const value = (p.arn || p.id || '').toString();
+                                                                const label = (p.name || p.arn || p.id || '').toString();
+                                                                if (!value) return null;
+                                                                return (
+                                                                    <option key={value} value={value}>
+                                                                        {label}
+                                                                    </option>
+                                                                );
+                                                            })
+                                                        )}
+                                                    </select>
+                                                    <p className="text-[10px] text-zinc-500 leading-relaxed">Required for some Bedrock models that don't support on-demand throughput. Select an inference profile ARN/ID that includes your chosen model.</p>
                                                 </div>
                                             </div>
                                         )}
@@ -1382,6 +1528,52 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                             />
                                                         </div>
                                                     </details>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* n8n Integration */}
+                                        <div className="bg-zinc-900 border border-zinc-800 overflow-hidden">
+                                            <div className="p-4 border-b border-zinc-800 bg-zinc-950 flex items-center justify-between">
+                                                <div className="flex items-center gap-3">
+                                                    <div className={`h-2 w-2 ${n8nApiKey ? 'bg-green-500' : 'bg-red-500'}`} />
+                                                    <span className="text-sm font-bold text-zinc-400">n8n</span>
+                                                </div>
+                                                <span className={`text-xs px-2 py-1 bg-zinc-900 border border-zinc-800 ${n8nApiKey ? 'text-green-400' : 'text-zinc-500'}`}>
+                                                    {n8nApiKey ? 'CONFIGURED' : 'NOT CONFIGURED'}
+                                                </span>
+                                            </div>
+                                            <div className="p-6 space-y-6">
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">n8n URL</label>
+                                                    <input
+                                                        type="text"
+                                                        value={n8nUrl}
+                                                        onChange={(e) => setN8nUrl(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors font-mono"
+                                                        placeholder="http://localhost:5678"
+                                                    />
+                                                    <p className="text-xs text-zinc-600">Defaults to localhost for local dev. Use your production n8n base URL in deployment.</p>
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">n8n API Key</label>
+                                                    <input
+                                                        type="password"
+                                                        value={n8nApiKey}
+                                                        onChange={(e) => setN8nApiKey(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors font-mono"
+                                                        placeholder="X-N8N-API-KEY"
+                                                    />
+                                                    <p className="text-xs text-zinc-600">Used server-side to list workflows and derive webhook URLs.</p>
+                                                </div>
+
+                                                <div className="pt-2 flex justify-end">
+                                                    <button
+                                                        onClick={handleSaveSection}
+                                                        className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-lg"
+                                                    >
+                                                        Save Changes
+                                                    </button>
                                                 </div>
                                             </div>
                                         </div>
@@ -1541,9 +1733,11 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                         {/* Fullscreen iframe */}
                         <iframe
                             src={
-                                draftTool?.url && draftTool.url.includes('webhook')
-                                    ? `http://localhost:5678/workflow/new`
-                                    : "http://localhost:5678/workflow/new"
+                                (() => {
+                                    const base = getN8nBaseUrl();
+                                    if (draftTool?.workflowId) return `${base}/workflow/${draftTool.workflowId}`;
+                                    return `${base}/workflow/new`;
+                                })()
                             }
                             className="w-full h-full"
                             title="n8n Editor Fullscreen"

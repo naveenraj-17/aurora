@@ -19,3 +19,4 @@ frontend/next-env.d.ts
 # Specific project files
 backend/chroma_db/
 backend/data/chroma_db/
+backend/.venv/

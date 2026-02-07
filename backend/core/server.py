@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import json
+from typing import Any
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -42,7 +43,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     intent: str = "chat" # chat, list_emails, render_email, list_files, list_events, request_auth, list_local_files, render_local_file
-    data: dict | None = None
+    data: Any | None = None
     tool_name: str | None = None
 
 # Global variables
@@ -128,7 +129,7 @@ async def lifespan(app: FastAPI):
         if MemoryStore:
             print("Initializing Memory Store...")
             global memory_store
-            memory_store = MemoryStore()
+            memory_store = _init_memory_store(load_settings())
         
         print("All agents connected.")
         yield
@@ -265,19 +266,120 @@ def get_active_agent_data():
 class Settings(BaseModel):
     agent_name: str
     model: str = "mistral" # Default model (Ollama or Cloud)
-    mode: str = "local" # "local" or "cloud"
+    mode: str = "local" # "local" | "cloud" | "bedrock"
     openai_key: str = ""
     anthropic_key: str = ""
     gemini_key: str = ""
+    bedrock_api_key: str = ""  # e.g. ABSK... (Amazon Bedrock API key)
+    # Optional: required for some Bedrock models that don't support on-demand throughput.
+    # Can be an inference profile ID or full ARN.
+    bedrock_inference_profile: str = ""
+    # Optional: embedding model used for long-term memory when mode == bedrock
+    embedding_model: str = ""
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
+    aws_session_token: str = ""
     aws_region: str = "us-east-1"
     sql_connection_string: str = ""
+    n8n_url: str = "http://localhost:5678"
+    n8n_api_key: str = ""
     show_browser: bool = False
+
+
+def _make_aws_client(service_name: str, region: str, settings: dict):
+    """Create a boto3 client.
+
+    If access/secret are not provided, boto3 will use its default credential chain
+    (env vars, AWS_PROFILE, SSO, instance role, etc.).
+    """
+    # Amazon Bedrock API keys can be provided as a bearer token via this env var.
+    # See: https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html
+    bedrock_api_key = (settings.get("bedrock_api_key") or "").strip()
+    # Users often paste a full header value. Normalize to the raw ABSK... token.
+    if bedrock_api_key:
+        # Strip surrounding quotes
+        if (bedrock_api_key.startswith('"') and bedrock_api_key.endswith('"')) or (
+            bedrock_api_key.startswith("'") and bedrock_api_key.endswith("'")
+        ):
+            bedrock_api_key = bedrock_api_key[1:-1].strip()
+
+        lower = bedrock_api_key.lower()
+        if lower.startswith("authorization:"):
+            bedrock_api_key = bedrock_api_key.split(":", 1)[1].strip()
+            lower = bedrock_api_key.lower()
+        if lower.startswith("bearer "):
+            bedrock_api_key = bedrock_api_key.split(" ", 1)[1].strip()
+
+    # If a Bedrock API key is provided, prefer it and avoid mixing auth mechanisms.
+    if bedrock_api_key:
+        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = bedrock_api_key
+        access_key = ""
+        secret_key = ""
+        session_token = ""
+    else:
+        # Clear if user removed it in settings
+        if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+        access_key = (settings.get("aws_access_key_id") or "").strip()
+        secret_key = (settings.get("aws_secret_access_key") or "").strip()
+        session_token = (settings.get("aws_session_token") or "").strip()
+    region_name = (region or settings.get("aws_region") or "us-east-1").strip()
+
+    kwargs = {
+        "service_name": service_name,
+        "region_name": region_name,
+    }
+
+    if access_key and secret_key:
+        kwargs.update(
+            {
+                "aws_access_key_id": access_key,
+                "aws_secret_access_key": secret_key,
+            }
+        )
+        if session_token:
+            kwargs["aws_session_token"] = session_token
+
+    return boto3.client(**kwargs)
 
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f:
         json.dump(settings, f, indent=4)
+
+
+def _init_memory_store(settings: dict):
+    """Initialize the long-term memory store with an embedding provider consistent with settings."""
+    if not MemoryStore:
+        return None
+
+    mode = (settings.get("mode") or "local").strip().lower()
+    model = (settings.get("model") or OLLAMA_MODEL).strip() or OLLAMA_MODEL
+
+    # Default: Ollama embeddings (MemoryStore will handle it).
+    embed_fn = None
+
+    # Bedrock mode: use a Bedrock embedding model instead of Ollama.
+    if mode == "bedrock":
+        region = (settings.get("aws_region") or "us-east-1").strip() or "us-east-1"
+        embed_model_id = (settings.get("embedding_model") or "amazon.titan-embed-text-v2:0").strip()
+
+        def _bedrock_embed(text: str):
+            bedrock = _make_aws_client("bedrock-runtime", region, settings)
+            payload = {"inputText": text}
+            resp = bedrock.invoke_model(
+                modelId=embed_model_id,
+                body=json.dumps(payload).encode("utf-8"),
+                accept="application/json",
+                contentType="application/json",
+            )
+            body = resp.get("body")
+            data = json.loads(body.read()) if body else {}
+            emb = data.get("embedding")
+            return emb if isinstance(emb, list) else None
+
+        embed_fn = _bedrock_embed
+
+    return MemoryStore(model=model, embed_fn=embed_fn)
 
 @app.get("/api/status")
 async def get_status():
@@ -307,7 +409,105 @@ async def update_settings(settings: Settings):
     print(f"DEBUG: update_settings called with: {settings.dict()}")
     data = settings.dict()
     save_settings(data)
+
+    # Reinitialize memory so embeddings provider matches the new mode.
+    global memory_store
+    if MemoryStore:
+        try:
+            memory_store = _init_memory_store(data)
+        except Exception as e:
+            print(f"Warning: failed to reinitialize MemoryStore after settings update: {e}")
     return data
+
+
+# --- n8n Integration (server-side proxy) ---
+def _get_n8n_config():
+    settings = load_settings()
+    base_url = (settings.get("n8n_url") or "").strip()
+    api_key = (settings.get("n8n_api_key") or "").strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="n8n_url is not configured")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="n8n_api_key is not configured")
+    return base_url.rstrip("/"), api_key
+
+
+async def _n8n_request(method: str, path: str):
+    base_url, api_key = _get_n8n_config()
+    url = f"{base_url}{path}"
+    headers = {"X-N8N-API-KEY": api_key}
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request(method, url, headers=headers)
+            if resp.status_code in (401, 403):
+                raise HTTPException(status_code=401, detail="n8n authentication failed")
+            resp.raise_for_status()
+            return resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"n8n request failed: {str(e)}")
+
+
+@app.get("/api/n8n/workflows")
+async def n8n_list_workflows():
+    """Lists workflows from n8n (requires n8n_url + n8n_api_key in settings)."""
+    data = await _n8n_request("GET", "/api/v1/workflows")
+
+    workflows = []
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        workflows = data.get("data")
+    elif isinstance(data, list):
+        workflows = data
+
+    # Normalize to a minimal UI-friendly shape
+    return [
+        {
+            "id": str(w.get("id")) if w.get("id") is not None else "",
+            "name": w.get("name") or "",
+            "active": bool(w.get("active")) if w.get("active") is not None else False,
+            "updatedAt": w.get("updatedAt") or w.get("updated_at") or None,
+        }
+        for w in workflows
+        if w is not None
+    ]
+
+
+@app.get("/api/n8n/workflows/{workflow_id}/webhook")
+async def n8n_get_workflow_webhook(workflow_id: str):
+    """Derives the production webhook URL for a workflow by locating a Webhook trigger node."""
+    base_url, _ = _get_n8n_config()
+    workflow = await _n8n_request("GET", f"/api/v1/workflows/{workflow_id}")
+
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list):
+        raise HTTPException(status_code=404, detail="Workflow nodes not found")
+
+    webhook_node = None
+    # Prefer the canonical webhook node type
+    for node in nodes:
+        if isinstance(node, dict) and (node.get("type") == "n8n-nodes-base.webhook"):
+            webhook_node = node
+            break
+    # Fallback: any node containing 'webhook'
+    if webhook_node is None:
+        for node in nodes:
+            t = (node.get("type") or "") if isinstance(node, dict) else ""
+            if "webhook" in t.lower():
+                webhook_node = node
+                break
+
+    if webhook_node is None:
+        raise HTTPException(status_code=404, detail="No webhook trigger node found in workflow")
+
+    parameters = webhook_node.get("parameters") if isinstance(webhook_node, dict) else None
+    path = parameters.get("path") if isinstance(parameters, dict) else None
+    if not path or not isinstance(path, str):
+        raise HTTPException(status_code=404, detail="Webhook path not found in workflow")
+
+    clean_path = path.lstrip("/")
+    production_url = f"{base_url}/webhook/{clean_path}"
+    return {"workflowId": str(workflow_id), "path": clean_path, "productionUrl": production_url}
 
 class GoogleCredsRequest(BaseModel):
     content: str # Raw JSON string or dict
@@ -456,6 +656,91 @@ async def get_models():
         local_models = ["mistral", "llama3"] # Fallback if Ollama down
         
     return {"local": local_models, "cloud": cloud_models}
+
+
+@app.get("/api/bedrock/models")
+async def get_bedrock_models():
+    """Lists Bedrock foundation models.
+
+    Note: This requires AWS credentials with `bedrock:ListFoundationModels`.
+    If no explicit keys are provided, the server will rely on boto3's default
+    credential chain (AWS_PROFILE/SSO/env/instance role).
+    """
+    settings = load_settings()
+    region = (settings.get("aws_region") or "us-east-1").strip() or "us-east-1"
+
+    def _list_models_sync():
+        client = _make_aws_client("bedrock", region, settings)
+        resp = client.list_foundation_models()
+        summaries = resp.get("modelSummaries", []) or []
+        models: list[str] = []
+        for s in summaries:
+            model_id = s.get("modelId")
+            if model_id:
+                models.append(f"bedrock.{model_id}")
+        return sorted(set(models))
+
+    try:
+        models = await asyncio.to_thread(_list_models_sync)
+        return {"models": models}
+    except Exception as e:
+        # Keep error details out of the client response; log server-side.
+        print(f"Error listing Bedrock models: {e}")
+        return {
+            "models": [],
+            "error": "Unable to list Bedrock models. Check AWS credentials/permissions and region.",
+        }
+
+
+@app.get("/api/bedrock/inference-profiles")
+async def get_bedrock_inference_profiles():
+    """Lists Bedrock inference profiles.
+
+    Some Bedrock models do not support on-demand throughput and must be invoked
+    using an inference profile ID/ARN. This endpoint helps the UI present
+    selectable inference profiles.
+    """
+    settings = load_settings()
+    region = (settings.get("aws_region") or "us-east-1").strip() or "us-east-1"
+
+    def _list_profiles_sync():
+        client = _make_aws_client("bedrock", region, settings)
+
+        if not hasattr(client, "list_inference_profiles"):
+            return []
+
+        resp = client.list_inference_profiles()
+        # Boto3 uses 'inferenceProfileSummaries' as of current API shape.
+        summaries = (
+            resp.get("inferenceProfileSummaries")
+            or resp.get("inferenceProfiles")
+            or resp.get("summaries")
+            or []
+        )
+        profiles = []
+        for s in summaries or []:
+            if not isinstance(s, dict):
+                continue
+            profiles.append(
+                {
+                    "id": s.get("inferenceProfileId") or s.get("id") or "",
+                    "arn": s.get("inferenceProfileArn") or s.get("arn") or "",
+                    "name": s.get("inferenceProfileName") or s.get("name") or "",
+                    "status": s.get("status") or "",
+                }
+            )
+        # Prefer stable ordering for UI.
+        return sorted(profiles, key=lambda p: (p.get("name") or p.get("arn") or p.get("id") or ""))
+
+    try:
+        profiles = await asyncio.to_thread(_list_profiles_sync)
+        return {"profiles": profiles}
+    except Exception as e:
+        print(f"Error listing Bedrock inference profiles: {e}")
+        return {
+            "profiles": [],
+            "error": "Unable to list Bedrock inference profiles. Check AWS credentials/permissions and region.",
+        }
 
 @app.get("/api/config")
 async def get_config():
@@ -620,61 +905,213 @@ async def chat(request: ChatRequest):
 
             return candidate["content"]["parts"][0]["text"]
 
-    async def call_bedrock(model_id, messages, system, access_key, secret_key, region):
+    async def call_bedrock(model_id, messages, system, region, settings):
         # Bedrock requires the exact model ID (e.g., anthropic.claude-3-5-sonnet-20240620-v1:0)
         # We strip the 'bedrock.' prefix if present
         real_model_id = model_id.replace("bedrock.", "")
+
+        # Some Bedrock models require an inference profile (no on-demand throughput).
+        # If provided, we invoke using the inference profile ID/ARN as modelId.
+        invocation_model_id = real_model_id
+        inference_profile = (settings.get("bedrock_inference_profile") or "").strip()
+        if inference_profile:
+            # Users may paste it with a bedrock. prefix from the UI list.
+            if inference_profile.startswith("bedrock."):
+                inference_profile = inference_profile.replace("bedrock.", "", 1)
+            invocation_model_id = inference_profile
         
         # Convert messages to Bedrock Converse API format or InvokeModel
         # Using Converse API (standardized) is preferred for newer models
         
-        bedrock = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=region,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key
-        )
-        
-        # Format for Claude 3 via Bedrock InvokeModel (Messages API)
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 4096,
-            "system": system,
-            "messages": messages
-        })
-        
-        # This is a synchronous call in boto3, so we might block the event loop slightly.
-        # In production, run in a threadpool. For hackathon, it's fine.
-        response = bedrock.invoke_model(
-            body=body,
-            modelId=real_model_id,
-            accept='application/json',
-            contentType='application/json'
-        )
-        
-        response_body = json.loads(response.get('body').read())
-        return response_body.get('content')[0].get('text')
+        bedrock = _make_aws_client("bedrock-runtime", region, settings)
 
-    async def generate_response(prompt_msg, sys_prompt, tools=None, history_messages=None):
+        # Normalize messages to a content-block list.
+        # For Bedrock Converse, content blocks are like: {"text": "..."}
+        # For Anthropic InvokeModel, blocks are like: {"type": "text", "text": "..."}
+        normalized_messages = []
+        for m in (messages or []):
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                normalized_messages.append({"role": role, "content": [{"text": content}]})
+            elif isinstance(content, list):
+                # Best effort: if caller already provided blocks, keep them but coerce to Converse schema
+                blocks = []
+                for b in content:
+                    if isinstance(b, dict) and "text" in b:
+                        blocks.append({"text": str(b.get("text"))})
+                    elif isinstance(b, dict) and b.get("type") == "text" and "text" in b:
+                        blocks.append({"text": str(b.get("text"))})
+                    else:
+                        blocks.append({"text": str(b)})
+                normalized_messages.append({"role": role, "content": blocks})
+            else:
+                normalized_messages.append({"role": role, "content": [{"text": str(content)}]})
+
+        system_blocks = []
+        if system and str(system).strip():
+            system_blocks = [{"text": str(system)}]
+
+        async def _converse_call():
+            def _run():
+                return bedrock.converse(
+                    modelId=invocation_model_id,
+                    messages=normalized_messages,
+                    system=system_blocks,
+                    inferenceConfig={"maxTokens": 4096},
+                )
+
+            return await asyncio.to_thread(_run)
+
+        async def _invoke_model_call():
+            # InvokeModel using Anthropic Messages schema
+            anthropic_messages = []
+            for m in normalized_messages:
+                anthropic_messages.append(
+                    {
+                        "role": m["role"],
+                        "content": [{"type": "text", "text": b.get("text", "")} for b in (m.get("content") or [])],
+                    }
+                )
+
+            payload = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 4096,
+                "system": str(system or ""),
+                "messages": anthropic_messages,
+            }
+
+            def _run():
+                return bedrock.invoke_model(
+                    body=json.dumps(payload).encode("utf-8"),
+                    modelId=invocation_model_id,
+                    accept="application/json",
+                    contentType="application/json",
+                )
+
+            return await asyncio.to_thread(_run)
+
+        # Prefer Converse if available; it avoids many per-model JSON schema mismatches.
+        try:
+            if hasattr(bedrock, "converse"):
+                resp = await _converse_call()
+                msg = (((resp or {}).get("output") or {}).get("message") or {})
+                content = msg.get("content") or []
+                if content and isinstance(content, list) and isinstance(content[0], dict):
+                    return content[0].get("text", "")
+                return ""
+        except Exception as e:
+            message = str(e)
+            if "on-demand throughput isn’t supported" in message or "on-demand throughput isn't supported" in message:
+                raise RuntimeError(
+                    "Bedrock model requires an inference profile (no on-demand throughput). "
+                    "Set settings.bedrock_inference_profile to an inference profile ID/ARN that includes this model, "
+                    "or pick a different Bedrock model that supports on-demand throughput."
+                )
+            # Fall back to InvokeModel; keep original exception in server logs.
+            print(f"Bedrock converse failed, falling back to invoke_model: {e}")
+
+        try:
+            resp = await _invoke_model_call()
+            response_body = json.loads(resp.get("body").read()) if resp and resp.get("body") else {}
+            content = response_body.get("content") or []
+            if content and isinstance(content, list) and isinstance(content[0], dict):
+                return content[0].get("text", "")
+            return ""
+        except Exception as e:
+            message = str(e)
+            if "on-demand throughput isn’t supported" in message or "on-demand throughput isn't supported" in message:
+                raise RuntimeError(
+                    "Bedrock model requires an inference profile (no on-demand throughput). "
+                    "Set settings.bedrock_inference_profile to an inference profile ID/ARN that includes this model, "
+                    "or pick a different Bedrock model that supports on-demand throughput."
+                )
+            raise
+
+    def _messages_to_transcript(messages: list[dict] | None) -> str:
+        """Lossy conversion of role/content messages to plain text for providers that only accept a single prompt."""
+        if not messages:
+            return ""
+        lines: list[str] = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            role = (m.get("role") or "").strip().lower()
+            content = m.get("content")
+            if isinstance(content, list):
+                # Best-effort concatenate any text blocks
+                parts: list[str] = []
+                for p in content:
+                    if isinstance(p, dict) and isinstance(p.get("text"), str):
+                        parts.append(p["text"])
+                text = "\n".join(parts).strip()
+            else:
+                text = (content or "").strip() if isinstance(content, str) else ""
+
+            if not text:
+                continue
+
+            if role == "user":
+                label = "User"
+            elif role == "assistant":
+                label = "Assistant"
+            elif role:
+                label = role.title()
+            else:
+                label = "Message"
+            lines.append(f"{label}: {text}")
+        return "\n".join(lines)
+
+    async def generate_response(
+        prompt_msg,
+        sys_prompt,
+        tools=None,
+        history_messages=None,
+        memory_context_text: str = "",
+    ):
+        augmented_system = (sys_prompt or "").strip()
+        if memory_context_text and memory_context_text.strip():
+            augmented_system = f"{augmented_system}\n\n{memory_context_text.strip()}".strip()
+
         if mode in ["cloud", "bedrock"]:
             try:
                 # Construct messages list for cloud providers that support it
-                messages = [{"role": "user", "content": prompt_msg}]
-                
+                messages = []
+                if history_messages:
+                    messages.extend(history_messages)
+                messages.append({"role": "user", "content": prompt_msg})
+
                 if current_model.startswith("gpt"):
-                    return await call_openai(current_model, [{"role": "system", "content": sys_prompt}] + messages, current_settings.get("openai_key"))
+                    return await call_openai(
+                        current_model,
+                        [{"role": "system", "content": augmented_system}] + messages,
+                        current_settings.get("openai_key"),
+                    )
                 elif current_model.startswith("claude"):
-                    return await call_anthropic(current_model, messages, sys_prompt, current_settings.get("anthropic_key"))
+                    return await call_anthropic(
+                        current_model,
+                        messages,
+                        augmented_system,
+                        current_settings.get("anthropic_key"),
+                    )
                 elif current_model.startswith("gemini"):
-                    return await call_gemini(current_model, prompt_msg, sys_prompt, current_settings.get("gemini_key"))
+                    # Gemini wrapper currently only accepts a single prompt string.
+                    transcript = _messages_to_transcript(messages)
+                    return await call_gemini(
+                        current_model,
+                        transcript or str(prompt_msg),
+                        augmented_system,
+                        current_settings.get("gemini_key"),
+                    )
                 elif current_model.startswith("bedrock"):
                     return await call_bedrock(
-                        current_model, 
-                        messages, 
-                        sys_prompt, 
-                        current_settings.get("aws_access_key_id"),
-                        current_settings.get("aws_secret_access_key"),
-                        current_settings.get("aws_region")
+                        current_model,
+                        messages,
+                        augmented_system,
+                        current_settings.get("aws_region"),
+                        current_settings,
                     )
                 else:
                     return "Error: Unknown cloud model selected."
@@ -690,7 +1127,7 @@ async def chat(request: ChatRequest):
                     
                     # Construct full message history
                     # 1. System Prompt
-                    messages = [{"role": "system", "content": sys_prompt}]
+                    messages = [{"role": "system", "content": augmented_system}]
                     
                     # 2. History (if available)
                     if history_messages:
@@ -727,12 +1164,19 @@ async def chat(request: ChatRequest):
 
                 # Fallback to generate if no tools or tools failed (Old behavior)
                 print(f"DEBUG: Calling Ollama /api/generate (Legacy Mode)...", flush=True)
+
+                prompt_for_generate = prompt_msg
+                if history_messages:
+                    prior = _messages_to_transcript(history_messages)
+                    if prior:
+                        prompt_for_generate = f"Conversation so far:\n{prior}\n\nUser: {prompt_msg}".strip()
+
                 response = await client.post(
                     f"{OLLAMA_BASE_URL}/api/generate",
                     json={
                         "model": current_model,
-                        "prompt": prompt_msg,
-                        "system": sys_prompt,
+                        "prompt": prompt_for_generate,
+                        "system": augmented_system,
                         "stream": False
                     },
                     timeout=None
@@ -752,7 +1196,8 @@ async def chat(request: ChatRequest):
     
     memory_context = ""
     if relevant_memories:
-        memory_context = "\nRelevant Past Conversations:\n" + "\n".join(relevant_memories) + "\n"
+        # Keep this as non-instructional context that the model can use as facts.
+        memory_context = "Relevant Past Conversations (long-term memory, use as context):\n" + "\n".join(relevant_memories)
 
     # 4. Inject Short-Term History
     # 4. Inject Short-Term History
@@ -771,6 +1216,7 @@ async def chat(request: ChatRequest):
     final_response = ""
     last_intent = "chat"
     last_data = None
+    tool_name = None
     
     # Track tools used in this turn
     tools_used_summary = []
@@ -810,7 +1256,8 @@ async def chat(request: ChatRequest):
                 active_prompt, 
                 active_sys_prompt, 
                 tools=ollama_tools, 
-                history_messages=active_history
+                history_messages=active_history,
+                memory_context_text=memory_context,
             )
             print(f"DEBUG: LLM Output: {llm_output[:100]}...") # Log first 100 chars
             
@@ -835,7 +1282,7 @@ async def chat(request: ChatRequest):
 
             if json_error:
                 print(f"DEBUG: JSON Error: {json_error}")
-                current_context += f"\nSystem: JSON Parsing Error: {json_error}. You generated invalid JSON (likely unescaped quotes or newlines). Please Try Again with valid, escaped JSON.\n"
+                current_context_text += f"\nSystem: JSON Parsing Error: {json_error}. You generated invalid JSON (likely unescaped quotes or newlines). Please Try Again with valid, escaped JSON.\n"
                 continue
 
             if tool_call and isinstance(tool_call, dict) and "tool" in tool_call:
@@ -891,8 +1338,9 @@ async def chat(request: ChatRequest):
                              
                              # Capture intent/data before continuing (restarting loop)
                              last_intent = "custom_tool"
-                             # Ensure last_data is a dictionary for the response
-                             if isinstance(json_resp, dict):
+                             # Return the final tool output as structured JSON directly under `data`
+                             # (n8n often returns a list; keep it as a list instead of string-wrapping)
+                             if json_resp is not None:
                                  last_data = json_resp
                              else:
                                  last_data = {"output": raw_output}

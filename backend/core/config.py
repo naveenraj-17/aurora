@@ -18,10 +18,16 @@ def load_settings():
         "openai_key": "",
         "anthropic_key": "",
         "gemini_key": "",
+        "bedrock_api_key": "",
+        "bedrock_inference_profile": "",
+        "embedding_model": "",
         "aws_access_key_id": "",
         "aws_secret_access_key": "",
+        "aws_session_token": "",
         "aws_region": "us-east-1",
         "sql_connection_string": "",
+        "n8n_url": "http://localhost:5678",
+        "n8n_api_key": "",
         "show_browser": False
     }
     

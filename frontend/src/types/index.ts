@@ -46,6 +46,6 @@ export interface SystemStatus {
     agents: Record<string, { status: string; name: string }>;
     overall: 'operational' | 'degraded' | 'down';
     model: string;
-    mode: 'local' | 'cloud';
+    mode: 'local' | 'cloud' | 'bedrock';
     active_agent_id?: string;
 }
