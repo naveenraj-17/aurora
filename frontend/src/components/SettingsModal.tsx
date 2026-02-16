@@ -2,7 +2,7 @@
 /* eslint-disable react/no-unescaped-entities */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useRef } from 'react';
-import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save, Wrench, ExternalLink } from 'lucide-react';
+import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save, Wrench } from 'lucide-react';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -13,7 +13,7 @@ interface SettingsModalProps {
     onToggleBrowser: (val: boolean) => void;
 }
 
-type Tab = 'general' | 'models' | 'workspace' | 'database' | 'memory' | 'agents' | 'datalab' | 'custom_tools';
+type Tab = 'general' | 'models' | 'workspace' | 'database' | 'memory' | 'agents' | 'datalab' | 'custom_tools' | 'personal_details';
 
 // Tool Group Definitions for UI
 const CAPABILITIES = [
@@ -54,10 +54,34 @@ const CAPABILITIES = [
         tools: ['search_web']
     },
     {
+        id: 'maps',
+        label: 'Google Maps',
+        description: 'Distance, duration, and directions link between two points.',
+        tools: ['get_map_details']
+    },
+    {
         id: 'sql',
         label: 'SQL Database',
         description: 'Query business database (Tables, SQL).',
         tools: ['list_tables', 'get_table_schema', 'run_sql_query']
+    },
+    {
+        id: 'datetime',
+        label: 'Date & Time',
+        description: 'Get current and future dates with natural language.',
+        tools: ['get_datetime']
+    },
+    {
+        id: 'collect_data',
+        label: 'Data Collection',
+        description: 'Request user input via dynamic forms.',
+        tools: ['collect_data']
+    },
+    {
+        id: 'personal_details',
+        label: 'Personal Details',
+        description: 'Get saved personal info (name, phone, address).',
+        tools: ['get_personal_details']
     }
 ];
 
@@ -82,9 +106,24 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     const [loadingInferenceProfiles, setLoadingInferenceProfiles] = useState(false);
     const [sqlConnectionString, setSqlConnectionString] = useState('');
 
+    // Integrations: Google Maps
+    const [googleMapsApiKey, setGoogleMapsApiKey] = useState('');
+
+    // Personal Details
+    const [pdFirstName, setPdFirstName] = useState('');
+    const [pdLastName, setPdLastName] = useState('');
+    const [pdEmail, setPdEmail] = useState('');
+    const [pdPhone, setPdPhone] = useState('');
+    const [pdAddress1, setPdAddress1] = useState('');
+    const [pdAddress2, setPdAddress2] = useState('');
+    const [pdCity, setPdCity] = useState('');
+    const [pdState, setPdState] = useState('');
+    const [pdZipcode, setPdZipcode] = useState('');
+
     // Integrations: n8n
     const [n8nUrl, setN8nUrl] = useState('http://localhost:5678');
     const [n8nApiKey, setN8nApiKey] = useState('');
+    const [globalConfig, setGlobalConfig] = useState<{ id: string, key: string, value: string }[]>([]);
 
     // Agents State
     const [agents, setAgents] = useState<any[]>([]);
@@ -142,11 +181,16 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
             anthropic_key: anthropicKey,
             gemini_key: geminiKey,
             bedrock_api_key: bedrockApiKey,
+            google_maps_api_key: googleMapsApiKey,
             bedrock_inference_profile: bedrockInferenceProfile,
             aws_region: awsRegion,
             sql_connection_string: sqlConnectionString,
             n8n_url: n8nUrl,
             n8n_api_key: n8nApiKey,
+            global_config: globalConfig.reduce((acc, curr) => {
+                if (curr.key.trim()) acc[curr.key.trim()] = curr.value;
+                return acc;
+            }, {} as Record<string, string>),
             show_browser: showBrowser
         }));
 
@@ -156,6 +200,33 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
         }
         setShowToast(true);
         setTimeout(() => setShowToast(false), 3000);
+    };
+
+    const handleSavePersonalDetails = async () => {
+        try {
+            const res = await fetch('/api/personal-details', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    first_name: pdFirstName,
+                    last_name: pdLastName,
+                    email: pdEmail,
+                    phone_number: pdPhone,
+                    address: {
+                        address1: pdAddress1,
+                        address2: pdAddress2,
+                        city: pdCity,
+                        state: pdState,
+                        zipcode: pdZipcode
+                    }
+                })
+            });
+            if (!res.ok) throw new Error('Failed to save personal details');
+            setShowToast(true);
+            setTimeout(() => setShowToast(false), 3000);
+        } catch {
+            alert('Error saving personal details.');
+        }
     };
 
     // Fullscreen State
@@ -281,12 +352,40 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                     setAnthropicKey(data.anthropic_key || '');
                     setGeminiKey(data.gemini_key || '');
                     setBedrockApiKey(data.bedrock_api_key || '');
+                    setGoogleMapsApiKey(data.google_maps_api_key || '');
                     setAwsRegion(data.aws_region || 'us-east-1');
                     setBedrockInferenceProfile(data.bedrock_inference_profile || '');
                     setSqlConnectionString(data.sql_connection_string || '');
                     setN8nUrl(data.n8n_url || 'http://localhost:5678');
                     setN8nApiKey(data.n8n_api_key || '');
+                    if (data.global_config) {
+                         const configArray = Object.entries(data.global_config).map(([k, v]) => ({
+                             id: Math.random().toString(36).substr(2, 9),
+                             key: k,
+                             value: v as string
+                         }));
+                         setGlobalConfig(configArray);
+                    } else {
+                        setGlobalConfig([]);
+                    }
                 });
+
+            // Personal details
+            fetch('/api/personal-details')
+                .then(res => res.json())
+                .then(data => {
+                    setPdFirstName(data.first_name || '');
+                    setPdLastName(data.last_name || '');
+                    setPdEmail(data.email || '');
+                    setPdPhone(data.phone_number || '');
+                    const addr = data.address || {};
+                    setPdAddress1(addr.address1 || '');
+                    setPdAddress2(addr.address2 || '');
+                    setPdCity(addr.city || '');
+                    setPdState(addr.state || '');
+                    setPdZipcode(addr.zipcode || '');
+                })
+                .catch(() => { });
 
             // Get models
             setLoadingModels(true);
@@ -494,6 +593,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
 
     const tabs = [
         { id: 'general', label: 'General', icon: LayoutGrid },
+        { id: 'personal_details', label: 'Personal Details', icon: Shield },
         { id: 'agents', label: 'Build Agents', icon: Bot },
         { id: 'custom_tools', label: 'Tool Builder', icon: Wrench },
         { id: 'datalab', label: 'Data Lab', icon: Database },
@@ -720,6 +820,19 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                                 onChange={e => setDraftAgent({ ...draftAgent, description: e.target.value })}
                                                                 className="w-full bg-zinc-950 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none"
                                                             />
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            <label className="text-[10px] font-bold text-zinc-500 uppercase">Agent Type</label>
+                                                            <select
+                                                                value={draftAgent.type || 'conversational'}
+                                                                onChange={e => setDraftAgent({ ...draftAgent, type: e.target.value })}
+                                                                className="w-full bg-zinc-950 border border-zinc-800 p-3 text-xs text-white focus:border-white focus:outline-none"
+                                                            >
+                                                                <option value="conversational">Conversational</option>
+                                                                <option value="analysis">Analysis</option>
+                                                                <option value="workflow">Workflow</option>
+                                                            </select>
+                                                            <p className="text-[9px] text-zinc-500 mt-1">Analysis agents support dynamic RAG for report tools</p>
                                                         </div>
                                                     </div>
 
@@ -950,12 +1063,48 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                                 </select>
                                                             </div>
                                                             <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Description (For AI)</label>
-                                                                <input type="text" value={draftTool.description} onChange={e => setDraftTool({ ...draftTool, description: e.target.value })}
-                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none"
-                                                                    placeholder="What does this tool do?" />
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Tool Type</label>
+                                                                <select value={draftTool.tool_type || 'standard'} onChange={e => setDraftTool({ ...draftTool, tool_type: e.target.value })}
+                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none">
+                                                                    <option value="standard">Standard</option>
+                                                                    <option value="report">Report (Supports RAG)</option>
+                                                                </select>
+                                                                <p className="text-[9px] text-zinc-500">Report tools enable dynamic RAG for analysis agents</p>
                                                             </div>
                                                         </div>
+
+                                                        <div className="space-y-1 col-span-2">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-500">Description (For AI)</label>
+                                                            <textarea 
+                                                                value={draftTool.description} 
+                                                                onChange={e => setDraftTool({ ...draftTool, description: e.target.value })}
+                                                                className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none resize-vertical min-h-[100px]"
+                                                                placeholder="What does this tool do? Describe its purpose, workflow, and critical rules..."
+                                                            />
+                                                            <p className="text-[10px] text-zinc-600">Provide detailed instructions for the AI on how to use this tool correctly.</p>
+                                                        </div>
+
+                                                        {draftTool.tool_type === 'report' && (
+                                                            <div className="space-y-1 col-span-2">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-500">Field Descriptions (JSON)</label>
+                                                                <textarea 
+                                                                    value={typeof draftTool.field_descriptions === 'string' ? draftTool.field_descriptions : JSON.stringify(draftTool.field_descriptions || [], null, 2)}
+                                                                    onChange={e => setDraftTool({ ...draftTool, field_descriptions: e.target.value })}
+                                                                    className="w-full bg-zinc-900 border border-zinc-800 p-2 text-xs font-mono text-zinc-300 focus:border-white focus:outline-none resize-vertical min-h-[150px]"
+                                                                    placeholder={JSON.stringify([
+                                                                        {
+                                                                            type: "delinquency",
+                                                                            fields: {
+                                                                                tenant_id: "Unique identifier for tenant",
+                                                                                balance_due: "Outstanding balance amount"
+                                                                            }
+                                                                        }
+                                                                    ], null, 2)}
+                                                                />
+                                                                <p className="text-[10px] text-zinc-600">Define field descriptions for each report type. Only relevant types are sent to LLM.</p>
+                                                            </div>
+                                                        )}
+
 
                                                         <div className="space-y-1">
                                                             <label className="text-[10px] uppercase font-bold text-zinc-500">n8n Workflow</label>
@@ -1567,6 +1716,65 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                     <p className="text-xs text-zinc-600">Used server-side to list workflows and derive webhook URLs.</p>
                                                 </div>
 
+                                                <div className="space-y-4 pt-4 border-t border-zinc-800">
+                                                    <div className="flex items-center justify-between">
+                                                        <div>
+                                                            <h4 className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Global Configuration Variables</h4>
+                                                            <p className="text-xs text-zinc-600 mt-1">These values are synced to the 'global_config' data table in n8n.</p>
+                                                        </div>
+                                                        <button
+                                                            onClick={() => setGlobalConfig([...globalConfig, { id: Math.random().toString(36).substr(2, 9), key: '', value: '' }])}
+                                                            className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white text-[10px] font-bold uppercase transition-colors"
+                                                        >
+                                                            <Plus className="h-3 w-3" /> Add Variable
+                                                        </button>
+                                                    </div>
+
+                                                    <div className="space-y-2">
+                                                        {globalConfig.length === 0 ? (
+                                                            <div className="text-center py-4 bg-zinc-950 border border-zinc-800 border-dashed text-zinc-600 text-xs italic">
+                                                                No global variables configured.
+                                                            </div>
+                                                        ) : (
+                                                            <div className="space-y-2">
+                                                                {globalConfig.map((item, idx) => (
+                                                                    <div key={item.id} className="flex gap-2 items-start animate-in fade-in slide-in-from-left-2 duration-200">
+                                                                        <input
+                                                                            type="text"
+                                                                            value={item.key}
+                                                                            onChange={(e) => {
+                                                                                const newConfig = [...globalConfig];
+                                                                                newConfig[idx].key = e.target.value;
+                                                                                setGlobalConfig(newConfig);
+                                                                            }}
+                                                                            placeholder="Key (e.g. USER_ID)"
+                                                                            className="flex-1 bg-zinc-950 border border-zinc-800 p-2 text-xs text-white focus:border-white focus:outline-none font-mono placeholder:text-zinc-700"
+                                                                        />
+                                                                        <input
+                                                                            type="text"
+                                                                            value={item.value}
+                                                                            onChange={(e) => {
+                                                                                const newConfig = [...globalConfig];
+                                                                                newConfig[idx].value = e.target.value;
+                                                                                setGlobalConfig(newConfig);
+                                                                            }}
+                                                                            placeholder="Value"
+                                                                            className="flex-[2] bg-zinc-950 border border-zinc-800 p-2 text-xs text-white focus:border-white focus:outline-none font-mono placeholder:text-zinc-700"
+                                                                        />
+                                                                        <button
+                                                                            onClick={() => setGlobalConfig(globalConfig.filter(i => i.id !== item.id))}
+                                                                            className="p-2 text-zinc-600 hover:text-red-500 hover:bg-zinc-900 transition-colors"
+                                                                            title="Remove variable"
+                                                                        >
+                                                                            <Trash className="h-3.5 w-3.5" />
+                                                                        </button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                </div>
                                                 <div className="pt-2 flex justify-end">
                                                     <button
                                                         onClick={handleSaveSection}
@@ -1576,6 +1784,168 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                     </button>
                                                 </div>
                                             </div>
+                                        </div>
+
+                                        {/* Google Maps Integration */}
+                                        <div className="bg-zinc-900 border border-zinc-800 overflow-hidden">
+                                            <div className="p-4 border-b border-zinc-800 bg-zinc-950 flex items-center justify-between">
+                                                <div className="flex items-center gap-3">
+                                                    <div className={`h-2 w-2 ${googleMapsApiKey ? 'bg-green-500' : 'bg-red-500'}`} />
+                                                    <span className="text-sm font-bold text-zinc-400">Google Maps</span>
+                                                </div>
+                                                <span className={`text-xs px-2 py-1 bg-zinc-900 border border-zinc-800 ${googleMapsApiKey ? 'text-green-400' : 'text-zinc-500'}`}>
+                                                    {googleMapsApiKey ? 'CONFIGURED' : 'NOT CONFIGURED'}
+                                                </span>
+                                            </div>
+                                            <div className="p-6 space-y-6">
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Maps API Key</label>
+                                                    <input
+                                                        type="password"
+                                                        value={googleMapsApiKey}
+                                                        onChange={(e) => setGoogleMapsApiKey(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors font-mono"
+                                                        placeholder="AIza..."
+                                                    />
+                                                    <p className="text-xs text-zinc-600">Used server-side for map distance calculations (Distance Matrix API).</p>
+                                                </div>
+
+                                                <div className="pt-2 flex justify-end">
+                                                    <button
+                                                        onClick={handleSaveSection}
+                                                        className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-lg"
+                                                    >
+                                                        Save Changes
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* PERSONAL DETAILS TAB */}
+                                {activeTab === 'personal_details' && (
+                                    <div className="space-y-8">
+                                        <div className="mb-4">
+                                            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                                                <Shield className="h-5 w-5" />
+                                                Personal Details
+                                            </h3>
+                                            <p className="text-zinc-500 text-sm mt-1">
+                                                Saved details the agent can use when completing workflows.
+                                            </p>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                            <div className="space-y-2">
+                                                <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">First Name</label>
+                                                <input
+                                                    type="text"
+                                                    value={pdFirstName}
+                                                    onChange={(e) => setPdFirstName(e.target.value)}
+                                                    className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors"
+                                                    placeholder="First name"
+                                                />
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Last Name</label>
+                                                <input
+                                                    type="text"
+                                                    value={pdLastName}
+                                                    onChange={(e) => setPdLastName(e.target.value)}
+                                                    className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors"
+                                                    placeholder="Last name"
+                                                />
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Email</label>
+                                                <input
+                                                    type="email"
+                                                    value={pdEmail}
+                                                    onChange={(e) => setPdEmail(e.target.value)}
+                                                    className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors font-mono"
+                                                    placeholder="name@company.com"
+                                                />
+                                            </div>
+                                            <div className="space-y-2">
+                                                <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Phone Number</label>
+                                                <input
+                                                    type="tel"
+                                                    value={pdPhone}
+                                                    onChange={(e) => setPdPhone(e.target.value)}
+                                                    className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors font-mono"
+                                                    placeholder="+1 555 555 5555"
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div className="border border-zinc-800 bg-zinc-900/20 p-6 space-y-6">
+                                            <div>
+                                                <div className="text-sm font-bold text-white">Address</div>
+                                                <div className="text-xs text-zinc-500">Used when a workflow needs a billing or mailing address.</div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Address 1</label>
+                                                    <input
+                                                        type="text"
+                                                        value={pdAddress1}
+                                                        onChange={(e) => setPdAddress1(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors"
+                                                        placeholder="Street address"
+                                                    />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Address 2</label>
+                                                    <input
+                                                        type="text"
+                                                        value={pdAddress2}
+                                                        onChange={(e) => setPdAddress2(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors"
+                                                        placeholder="Apt, suite, unit"
+                                                    />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">City</label>
+                                                    <input
+                                                        type="text"
+                                                        value={pdCity}
+                                                        onChange={(e) => setPdCity(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors"
+                                                        placeholder="City"
+                                                    />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">State</label>
+                                                    <input
+                                                        type="text"
+                                                        value={pdState}
+                                                        onChange={(e) => setPdState(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors"
+                                                        placeholder="State"
+                                                    />
+                                                </div>
+                                                <div className="space-y-2">
+                                                    <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Zipcode</label>
+                                                    <input
+                                                        type="text"
+                                                        value={pdZipcode}
+                                                        onChange={(e) => setPdZipcode(e.target.value)}
+                                                        className="w-full bg-zinc-900 border border-zinc-800 p-3 text-sm text-white focus:border-white focus:outline-none transition-colors font-mono"
+                                                        placeholder="Zipcode"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="pt-2 flex justify-end">
+                                            <button
+                                                onClick={handleSavePersonalDetails}
+                                                className="px-6 py-2.5 text-sm font-bold bg-white text-black hover:bg-zinc-200 transition-all shadow-lg"
+                                            >
+                                                Save Changes
+                                            </button>
                                         </div>
                                     </div>
                                 )}

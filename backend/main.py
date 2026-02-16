@@ -1,4 +1,5 @@
 import uvicorn
+print("🔥🔥🔥 MAIN.PY LOADED - VERSION WITH RAG DEBUGGING 🔥🔥🔥")
 import os
 import sys
 

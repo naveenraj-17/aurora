@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 export interface Email {
     id: string;
     sender: string;
@@ -37,7 +38,7 @@ export interface LocalFile {
 export interface Message {
     role: 'user' | 'assistant';
     content: string;
-    intent?: 'chat' | 'list_emails' | 'read_email' | 'list_files' | 'list_events' | 'request_auth' | 'list_local_files' | 'render_local_file' | 'draft_email' | 'send_email' | 'custom_tool';
+    intent?: 'chat' | 'list_emails' | 'read_email' | 'list_files' | 'list_events' | 'request_auth' | 'list_local_files' | 'render_local_file' | 'draft_email' | 'send_email' | 'custom_tool' | 'collect_data';
     data?: any;
     tool?: string;
 }

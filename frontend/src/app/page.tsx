@@ -11,11 +11,18 @@ import { DriveList } from '@/components/DriveList';
 import { EventList } from '@/components/EventList';
 import { LocalFileList } from '@/components/LocalFileList';
 import { EmailComposer } from '@/components/EmailComposer';
+import { CollectDataForm } from '@/components/CollectDataForm';
 
 import { renderTextContent, cn } from '@/lib/utils';
 import { Message, SystemStatus } from '@/types';
 
 export default function Home() {
+  const [sessionId] = useState(() => {
+    const c: any = (globalThis as any).crypto;
+    if (c?.randomUUID) return c.randomUUID();
+    return `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  });
+
   const [messages, setMessages] = useState<Message[]>([
     { role: 'assistant', content: 'System Internal v1.0. Ready for input.' }
   ]);
@@ -27,6 +34,7 @@ export default function Home() {
   const [credentials, setCredentials] = useState(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [streamingActivity, setStreamingActivity] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -111,6 +119,17 @@ export default function Home() {
         openai_key: keys.openai_key,
         anthropic_key: keys.anthropic_key,
         gemini_key: keys.gemini_key,
+        bedrock_api_key: keys.bedrock_api_key,
+        bedrock_inference_profile: keys.bedrock_inference_profile,
+        aws_access_key_id: keys.aws_access_key_id,
+        aws_secret_access_key: keys.aws_secret_access_key,
+        aws_session_token: keys.aws_session_token,
+        aws_region: keys.aws_region,
+        sql_connection_string: keys.sql_connection_string,
+        n8n_url: keys.n8n_url,
+        n8n_api_key: keys.n8n_api_key,
+        google_maps_api_key: keys.google_maps_api_key,
+        global_config: keys.global_config,
         show_browser: keys.show_browser
       })
     });
@@ -154,14 +173,146 @@ export default function Home() {
     await processMessage(`Open file: ${path}`);
   };
 
+  const handleCollectDataSubmit = async (values: Record<string, any>) => {
+    // Format the response based on whether it's a single field or multiple fields
+    const keys = Object.keys(values);
+
+    let userMessage: string;
+    if (keys.length === 1) {
+      // Single field: just send the value
+      const value = values[keys[0]];
+      userMessage = Array.isArray(value) ? value.join(', ') : String(value);
+    } else {
+      // Multiple fields: format as "Field1: value1, Field2: value2"
+      userMessage = keys
+        .map(key => {
+          const value = values[key];
+          const displayValue = Array.isArray(value) ? value.join(', ') : value;
+          return `${key}: ${displayValue}`;
+        })
+        .join(', ');
+    }
+
+    setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    await processMessage(userMessage);
+  };
+
   // Refactor duplicate fetch logic into helper
   const processMessage = async (content: string) => {
     setIsLoading(true);
+    setStreamingActivity(null);
+
+    // Try SSE streaming first
+    try {
+      await processMessageSSE(content);
+    } catch (sseError) {
+      console.error('[SSE] SSE failed, falling back to HTTP:', sseError);
+      // Fallback to HTTP
+      await processMessageHTTP(content);
+    } finally {
+      setIsLoading(false);
+      setStreamingActivity(null);
+    }
+  };
+
+  // SSE Streaming implementation
+  const processMessageSSE = async (content: string) => {
+    return new Promise<void>((resolve, reject) => {
+      const params = new URLSearchParams({
+        message: content,
+        session_id: sessionId,
+      });
+
+      // Use POST for SSE to send body data
+      console.log('[SSE] Attempting SSE connection to /api/chat/stream');
+      fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: content, session_id: sessionId }),
+      })
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`SSE request failed: ${response.status}`);
+          }
+
+          const reader = response.body?.getReader();
+          const decoder = new TextDecoder();
+
+          if (!reader) {
+            throw new Error('No reader available for SSE');
+          }
+
+          let buffer = '';
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  console.log('[SSE Event]', data.type, data);
+
+                  switch (data.type) {
+                    case 'status':
+                      setStreamingActivity(data.message);
+                      break;
+                    case 'thinking':
+                      setStreamingActivity('🤔 Thinking');
+                      break;
+                    case 'tool_execution':
+                      const toolDisplayName = data.tool_name
+                        .replace(/_/g, ' ')
+                        .replace(/\b\w/g, (l: string) => l.toUpperCase());
+                      setStreamingActivity(`🔧 ${toolDisplayName}`);
+                      break;
+                    case 'tool_result':
+                      setStreamingActivity(`✓ Processing results`);
+                      break;
+                    case 'response':
+                      // Final response
+                      setMessages(prev => [...prev, {
+                        role: 'assistant',
+                        content: data.content,
+                        intent: data.intent,
+                        data: data.data,
+                        tool: data.tool_name
+                      }]);
+                      break;
+                    case 'done':
+                      resolve();
+                      return;
+                    case 'error':
+                      reject(new Error(data.message));
+                      return;
+                  }
+                } catch (e) {
+                  console.error('Failed to parse SSE event:', e);
+                }
+              }
+            }
+          }
+
+          resolve();
+        })
+        .catch((err) => {
+          reject(err);
+        });
+    });
+  };
+
+  // HTTP fallback implementation (original logic)
+  const processMessageHTTP = async (content: string) => {
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: content }),
+        body: JSON.stringify({ message: content, session_id: sessionId }),
       });
       const data = await res.json();
       setMessages(prev => [...prev, {
@@ -172,8 +323,6 @@ export default function Home() {
       }]);
     } catch (err) {
       setMessages(prev => [...prev, { role: 'assistant', content: "Error communicating with agent." }]);
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -279,7 +428,8 @@ export default function Home() {
           <div className="w-full md:max-w-5xl mx-auto space-y-6">
             {messages.map((msg, idx) => (
               <div key={idx} className={cn(
-                "flex gap-4 max-w-3xl",
+                "flex gap-4",
+                msg.role === 'assistant' ? "max-w-4xl" : "max-w-3xl",
                 msg.role === 'user' ? "ml-auto flex-row-reverse" : ""
               )}>
                 <div className={cn(
@@ -337,6 +487,9 @@ export default function Home() {
                           Draft processed.
                         </div>
                       )}
+                      {msg.intent === 'collect_data' && msg.data && (
+                        <CollectDataForm data={msg.data} onSubmit={handleCollectDataSubmit} />
+                      )}
                     </div>
                   )}
                 </div>
@@ -345,14 +498,28 @@ export default function Home() {
 
             {/* Loading Indicator */}
             {isLoading && (
-              <div className="flex gap-4 max-w-3xl">
-                <div className="h-8 w-8 shrink-0 flex items-center justify-center border bg-black border-zinc-700 text-zinc-400">
-                  <Bot className="h-4 w-4 animate-pulse" />
+              <div className="flex gap-4 max-w-3xl items-center">
+                {/* Spinning Bot Icon with Ring */}
+                <div className="relative h-8 w-8 shrink-0">
+                  {/* Outer spinning ring */}
+                  <div className="absolute inset-0 border-2 border-transparent border-t-purple-500 border-r-purple-500/50 rounded-full animate-spin"></div>
+                  {/* Inner bot icon */}
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <Bot className="h-4 w-4 text-purple-400" />
+                  </div>
                 </div>
-                <div className="flex items-center gap-1 p-4 bg-zinc-900/50 border border-zinc-800 self-start">
-                  <div className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                  <div className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                  <div className="w-1.5 h-1.5 bg-zinc-500 rounded-full animate-bounce"></div>
+
+                {/* Status text with animated dots */}
+                <div className="flex items-baseline gap-0.5">
+                  <span className="text-sm text-zinc-300 font-medium">
+                    {streamingActivity || 'Processing'}
+                  </span>
+                  {/* Animated dots - smaller and inline */}
+                  <span className="flex gap-0.5 items-end pb-0.5">
+                    <span className="inline-block w-0.5 h-0.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '0ms', animationDuration: '1s' }}></span>
+                    <span className="inline-block w-0.5 h-0.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms', animationDuration: '1s' }}></span>
+                    <span className="inline-block w-0.5 h-0.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '300ms', animationDuration: '1s' }}></span>
+                  </span>
                 </div>
               </div>
             )}
