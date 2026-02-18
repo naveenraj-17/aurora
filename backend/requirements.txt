@@ -14,3 +14,7 @@ sqlalchemy
 psycopg2-binary
 pymysql
 pypdf
+pdfplumber
+pandas
+openpyxl
+requests

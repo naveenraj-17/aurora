@@ -33,6 +33,7 @@ export async function POST(req: Request) {
             },
         });
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (error: any) {
         console.error("SSE Proxy Error:", error);
         return NextResponse.json({ error: `Proxy Error: ${error.message}` }, { status: 500 });

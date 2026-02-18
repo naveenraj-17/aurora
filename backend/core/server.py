@@ -15,6 +15,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 import httpx
 import boto3
+from botocore.config import Config
 from services.google import get_auth_url, finish_auth
 from services.synthetic_data import generate_synthetic_data, SyntheticDataRequest, current_job, DATASETS_DIR
 
@@ -26,6 +27,8 @@ try:
 except ImportError:
     print("Warning: MemoryStore dependencies not found. Memory disabled.")
     MemoryStore = None
+
+from core.mcp_client import MCPClientManager
 
 # Configuration
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
@@ -45,6 +48,8 @@ AGENTS = {
     "maps": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "map_details.py"),
     "personal_details": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "personal_details.py"),
     "collect_data": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "collect_data.py"),
+    "pdf_parser": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "pdf_parser.py"),
+    "xlsx_parser": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "xlsx_parser.py"),
 }
 
 class ChatRequest(BaseModel):
@@ -68,6 +73,7 @@ agent_sessions: dict[str, ClientSession] = {}
 tool_router: dict[str, str] = {}
 exit_stack = None
 memory_store = None
+mcp_manager: Optional[MCPClientManager] = None
 
 from collections import deque
 
@@ -175,35 +181,42 @@ def _extract_and_persist_ids(session_id: str, tool_name: str, tool_output: str):
     """
     try:
         parsed = json.loads(tool_output)
-        if not isinstance(parsed, dict):
-            return
         
         ss = _get_session_state(session_id)
         
-        def _extract_ids_recursive(data: dict, prefix: str = ""):
-            """Recursively extract ID fields from nested dictionaries."""
-            for key, value in data.items():
-                # Check if this looks like an ID field
-                is_id_field = (
-                    key.endswith("_id") or 
-                    key.endswith("Id") or 
-                    key.lower() in ["id", "uuid"]
-                )
-                
-                if is_id_field and value is not None and value != "":
-                    # Store with original key (not prefixed) for easy access
-                    ss[key] = value
-                    print(f"DEBUG: Persisted {key}={value} to session state (from tool: {tool_name})")
-                
-                # Recurse into nested dicts (one level deep to avoid over-extraction)
-                elif isinstance(value, dict) and not prefix:
-                    _extract_ids_recursive(value, prefix=key)
-                
-                # Handle arrays of objects
-                elif isinstance(value, list) and value and isinstance(value[0], dict):
-                    # Extract IDs from first item (common pattern for result lists)
-                    _extract_ids_recursive(value[0], prefix=f"{key}[0]")
-        
+        def _extract_ids_recursive(data: Any, prefix: str = ""):
+            """Recursively extract ID fields from nested dictionaries and lists."""
+            
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    # Check if this looks like an ID field
+                    is_id_field = (
+                        key.endswith("_id") or 
+                        key.endswith("Id") or 
+                        key.lower() in ["id", "uuid"]
+                    )
+                    
+                    if is_id_field and value is not None and value != "":
+                        # Store with original key (not prefixed) for easy access
+                        # We overwrite previous values, which effectively means "last seen ID wins"
+                        ss[key] = value
+                        print(f"DEBUG: Persisted {key}={value} to session state (from tool: {tool_name})")
+                    
+                    # Recurse into nested dicts
+                    elif isinstance(value, (dict, list)):
+                        _extract_ids_recursive(value, prefix=key)
+            
+            elif isinstance(data, list):
+                # If list has items, verify they are dicts or lists
+                # We prioritize the FIRST item for ID extraction if it's a single item list
+                # Or if it's a list of results, the first result usually contains the relevant context ID
+                if len(data) > 0:
+                    # Strategy: Always extract from the FIRST item deeply
+                    # This ensures if we get [Obj1, Obj2], we at least get Obj1's IDs.
+                    # This matches "Single Item Array" requirement perfectly.
+                    if isinstance(data[0], (dict, list)):
+                         _extract_ids_recursive(data[0], prefix=f"{prefix}[0]")
+
         _extract_ids_recursive(parsed)
         
     except Exception as e:
@@ -288,6 +301,29 @@ async def lifespan(app: FastAPI):
             for tool in tools.tools:
                 tool_router[tool.name] = agent_name
                 print(f"  Registered tool: {tool.name} -> {agent_name}")
+
+        # --- Initialize External MCP Servers ---
+        global mcp_manager
+        mcp_manager = MCPClientManager(exit_stack)
+        print("Connecting to external MCP servers...")
+        external_sessions = await mcp_manager.connect_all()
+        
+        for name, session in external_sessions.items():
+            # Prefix to avoid collision with internal agents
+            agent_key = f"ext_mcp_{name}"
+            agent_sessions[agent_key] = session
+            print(f"Connected external MCP server: {name}")
+            
+            try:
+                tools = await session.list_tools()
+                print(f"  MCP Server '{name}' returned {len(tools.tools)} tools.")
+                for tool in tools.tools:
+                    tool_router[tool.name] = agent_key
+                    print(f"  Registered external tool: {tool.name} -> {agent_key}")
+            except Exception as e:
+                print(f"  Error listing tools for {name}: {e}")
+                import traceback
+                traceback.print_exc()
                 
         # Initialize Memory Store
         if MemoryStore:
@@ -366,6 +402,49 @@ def save_custom_tools(tools):
 async def get_custom_tools():
     return load_custom_tools()
 
+@app.get("/api/tools/available")
+async def get_available_tools():
+    """List all available tools from all sources (Native Agents, External MCP, Custom HTTP)"""
+    all_tools = []
+    
+    # 1. Active MCP Sessions (Native + External)
+    for name, session in agent_sessions.items():
+        try:
+            # Determine source type
+            is_external = name.startswith("ext_mcp_")
+            source_label = name.replace("ext_mcp_", "") if is_external else name
+            tool_type = "mcp_external" if is_external else "mcp_native"
+            
+            # Fetch tools
+            result = await session.list_tools()
+            for t in result.tools:
+                all_tools.append({
+                    "name": t.name,
+                    "description": t.description,
+                    "source": source_label,
+                    "type": tool_type,
+                    "schema": t.inputSchema
+                })
+        except Exception as e:
+            print(f"Error listing tools for agent '{name}': {e}")
+
+    # 2. Custom HTTP Tools
+    try:
+        custom_tools = load_custom_tools()
+        for t in custom_tools:
+            all_tools.append({
+                "name": t.get("name"),
+                "label": t.get("generalName", t.get("name")), 
+                "description": t.get("description", ""),
+                "source": "custom_http",
+                "type": "http",
+                "schema": t.get("schema")
+            })
+    except Exception as e:
+        print(f"Error listing custom tools: {e}")
+        
+    return {"tools": all_tools}
+
 @app.post("/api/tools/custom")
 async def create_custom_tool(tool: dict):
     # Expects: { id, name, description, method (GET/POST), url, schema }
@@ -385,6 +464,57 @@ async def delete_custom_tool(tool_name: str):
     tools = [t for t in tools if t['name'] != tool_name]
     save_custom_tools(tools)
     return {"status": "success"}
+
+# --- External MCP Server Management ---
+
+@app.get("/api/mcp/servers")
+async def list_mcp_servers():
+    if not mcp_manager:
+        return []
+    return mcp_manager.servers_config
+
+class AddMCPServerRequest(BaseModel):
+    name: str
+    command: str
+    args: List[str] = []
+    env: Dict[str, str] = {}
+
+@app.post("/api/mcp/servers")
+async def add_mcp_server(req: AddMCPServerRequest):
+    if not mcp_manager:
+        raise HTTPException(status_code=500, detail="MCP Manager not initialized")
+    try:
+        config = await mcp_manager.add_server(req.name, req.command, req.args, req.env)
+        # Register the new session and tools immediately
+        session = mcp_manager.sessions.get(req.name)
+        if session:
+             agent_key = f"ext_mcp_{req.name}"
+             agent_sessions[agent_key] = session
+             tools = await session.list_tools()
+             for tool in tools.tools:
+                 tool_router[tool.name] = agent_key
+        return {"status": "success", "config": config}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.delete("/api/mcp/servers/{name}")
+async def remove_mcp_server(name: str):
+    if not mcp_manager:
+        raise HTTPException(status_code=500, detail="MCP Manager not initialized")
+    try:
+        await mcp_manager.remove_server(name)
+        # Cleanup session and router (best effort)
+        agent_key = f"ext_mcp_{name}"
+        if agent_key in agent_sessions:
+            del agent_sessions[agent_key]
+        # Cleanup router - expensive linear scan but infrequent
+        keys_to_del = [k for k, v in tool_router.items() if v == agent_key]
+        for k in keys_to_del:
+            del tool_router[k]
+            
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 # --- Agent Management Logic ---
 class Agent(BaseModel):
@@ -568,6 +698,22 @@ def _make_aws_client(service_name: str, region: str, settings: dict):
         )
         if session_token:
             kwargs["aws_session_token"] = session_token
+
+    # -------------------------------------------------------------------------
+    # RETRY CONFIGURATION (Fix for ServiceUnavailableException / Throttling)
+    # -------------------------------------------------------------------------
+    # Standard retries are often insufficient for high-concurrency Bedrock usage.
+    # Adaptive mode allows standard retry logic to dynamically adjust for
+    # optimal request rates.
+    retry_config = Config(
+        retries={
+            'max_attempts': 10,
+            'mode': 'adaptive'
+        },
+        read_timeout=900,
+        connect_timeout=900,
+    )
+    kwargs["config"] = retry_config
 
     return boto3.client(**kwargs)
 
@@ -2120,8 +2266,12 @@ Examples:
                                          json_resp = filtered_resp
 
                                  raw_output = json.dumps(json_resp)
-                             except:
+                             except Exception as e:
+                                 print(f"DEBUG: Failed to parse JSON from {url}: {e}")
                                  raw_output = resp.text
+                                 if not raw_output:
+                                     print(f"DEBUG: ❌ Empty response from {tool_name} (Status: {resp.status_code})")
+                                     raw_output = json.dumps({"error": f"Empty response from tool {tool_name} (Status: {resp.status_code})"})
                                  
                                  
                              current_context_text += f"\nTool '{tool_name}' Output: {raw_output}\n"
@@ -2145,6 +2295,9 @@ Examples:
                                              if isinstance(parsed_output, list):
                                                  for idx, report_obj in enumerate(parsed_output):
                                                      if isinstance(report_obj, dict) and "data" in report_obj:
+                                                         if report_obj.get("is_file"):
+                                                             print(f"DEBUG: 📂 Report #{idx+1} is a FILE. Skipping auto-embedding.")
+                                                             continue
                                                          report_type = report_obj.get("report", "unknown")
                                                          report_data = report_obj.get("data", [])
                                                          
@@ -3282,8 +3435,12 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                                             if filtered_resp:
                                                 json_resp = filtered_resp
                                         raw_output = json.dumps(json_resp)
-                                    except:
+                                    except Exception as e:
+                                        print(f"DEBUG: Failed to parse JSON from {url}: {e}")
                                         raw_output = resp.text
+                                        if not raw_output:
+                                            print(f"DEBUG: ❌ Empty response from {tool_name} (Status: {resp.status_code})")
+                                            raw_output = json.dumps({"error": f"Empty response from tool {tool_name} (Status: {resp.status_code})"})
                                     
                                     # Debug logging for custom tool
                                     print(f"\n{'='*60}")
@@ -3313,6 +3470,9 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                                                     if isinstance(parsed_output, list):
                                                         for idx, report_obj in enumerate(parsed_output):
                                                             if isinstance(report_obj, dict) and "data" in report_obj:
+                                                                if report_obj.get("is_file"):
+                                                                    print(f"DEBUG: 📂 Report #{idx+1} is a FILE. Skipping auto-embedding.")
+                                                                    continue
                                                                 report_type = report_obj.get("report", "unknown")
                                                                 report_data = report_obj.get("data", [])
                                                                 

@@ -2,7 +2,7 @@
 /* eslint-disable react/no-unescaped-entities */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useRef } from 'react';
-import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save, Wrench } from 'lucide-react';
+import { Settings, X, Shield, HelpCircle, Trash, Cpu, Cloud, Database, LayoutGrid, Bot, Plus, Save, Wrench, Server, Ban } from 'lucide-react';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -13,7 +13,7 @@ interface SettingsModalProps {
     onToggleBrowser: (val: boolean) => void;
 }
 
-type Tab = 'general' | 'models' | 'workspace' | 'database' | 'memory' | 'agents' | 'datalab' | 'custom_tools' | 'personal_details';
+type Tab = 'general' | 'models' | 'workspace' | 'database' | 'memory' | 'agents' | 'datalab' | 'custom_tools' | 'personal_details' | 'mcp_servers';
 
 // Tool Group Definitions for UI
 const CAPABILITIES = [
@@ -82,6 +82,18 @@ const CAPABILITIES = [
         label: 'Personal Details',
         description: 'Get saved personal info (name, phone, address).',
         tools: ['get_personal_details']
+    },
+    {
+        id: 'pdf_parser',
+        label: 'PDF Parser',
+        description: 'Parse content from PDF files via URL.',
+        tools: ['parse_pdf']
+    },
+    {
+        id: 'xlsx_parser',
+        label: 'Excel Parser',
+        description: 'Parse content from Excel (XLSX) files via URL.',
+        tools: ['parse_xlsx']
     }
 ];
 
@@ -141,6 +153,15 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
     // n8n workflows (for Tool Builder dropdown)
     const [n8nWorkflows, setN8nWorkflows] = useState<any[]>([]);
     const [n8nWorkflowsLoading, setN8nWorkflowsLoading] = useState(false);
+
+    // MCP Servers State
+    const [mcpServers, setMcpServers] = useState<any[]>([]);
+    const [loadingMcp, setLoadingMcp] = useState(false);
+    const [draftMcpServer, setDraftMcpServer] = useState<{name: string, command: string, args: string, env: {key:string, value:string}[]}>({
+        name: '', command: '', args: '', env: []
+    });
+
+    const [availableCapabilities, setAvailableCapabilities] = useState<any[]>(CAPABILITIES);
 
     const refreshBedrockModels = async () => {
         setLoadingModels(true);
@@ -411,6 +432,62 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                 .then(data => {
                     setCustomTools(Array.isArray(data) ? data : []);
                 });
+
+            // Get Available Capabilities (Dynamic Tools + MCP)
+            fetch('/api/tools/available')
+                .then(res => res.json())
+                .then(data => {
+                    const tools = data.tools || [];
+                    const groups: Record<string, any> = {};
+                    
+                    tools.forEach((t: any) => {
+                        // Special handling for legacy custom tools: UNGROUP THEM
+                        if (t.source === 'custom_http') {
+                            const capId = t.name;
+                            // avoid duplicate if same custom tool appears somehow
+                            if (!groups[capId]) {
+                                groups[capId] = {
+                                    id: capId,
+                                    label: t.label || t.name, // Use generalName if available
+                                    description: t.description,
+                                    tools: [t.name],
+                                    toolType: 'custom'
+                                };
+                            }
+                        } else {
+                            // Group by source (e.g., 'gmail', 'filesystem')
+                            const source = t.source || 'unknown';
+                            if (!groups[source]) {
+                                groups[source] = {
+                                    id: source,
+                                    label: source.charAt(0).toUpperCase() + source.slice(1).replace(/_/g, ' '),
+                                    description: `Tools from ${source}`,
+                                    tools: [],
+                                    /* 
+                                     * Determine tool type for badge:
+                                     * - mcp_external -> 'mcp'
+                                     * - mcp_native -> 'native' (no badge, but logic might say otherwise)
+                                     * - custom_http -> 'custom' (handled above really, but safe fallback)
+                                     */
+                                    toolType: t.type === 'mcp_external' ? 'mcp' : (t.type === 'mcp_native' ? 'native' : 'custom')
+                                };
+                            }
+                            groups[source].tools.push(t.name);
+                        }
+                    });
+                    
+                    const dynamicCaps = Object.values(groups);
+                    const merged = dynamicCaps.map(cap => {
+                        // Try to find matching static capability by ID (e.g. 'gmail')
+                        const existing = CAPABILITIES.find(c => c.id === cap.id);
+                        if (existing) {
+                            return { ...cap, label: existing.label, description: existing.description, toolType: 'native' };
+                        }
+                        return cap;
+                    });
+                    
+                    setAvailableCapabilities(merged);
+                });
         }
     }, [isOpen]);
 
@@ -433,6 +510,84 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
         fetchN8nWorkflows();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isOpen, activeTab, draftTool, toolBuilderMode]);
+
+    // Fetch MCP Servers
+    useEffect(() => {
+        if (isOpen && activeTab === 'mcp_servers') {
+            fetchMcpServers();
+        }
+    }, [isOpen, activeTab]);
+
+    const fetchMcpServers = async () => {
+        setLoadingMcp(true);
+        try {
+            const res = await fetch('/api/mcp/servers');
+            if (res.ok) {
+                const data = await res.json();
+                setMcpServers(Array.isArray(data) ? data : []);
+            }
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setLoadingMcp(false);
+        }
+    };
+
+    const handleAddMcpServer = async () => {
+        if (!draftMcpServer.name || !draftMcpServer.command) {
+            alert("Name and Command are required.");
+            return;
+        }
+        
+        // Parse args
+        // Simple parsing: split by space but respect quotes? 
+        // For now, just split by space is a basic start, or use a library if needed.
+        // Or assume user passes args as a string and we split it.
+        // To be safe, let's treat it as a raw string split for now.
+        const argsList = draftMcpServer.args.match(/(?:[^\s"]+|"[^"]*")+/g)?.map(s => s.replace(/^"|"$/g, '')) || [];
+        
+        const envObj = draftMcpServer.env.reduce((acc, curr) => {
+            if (curr.key) acc[curr.key] = curr.value;
+            return acc;
+        }, {} as Record<string, string>);
+
+        try {
+            const res = await fetch('/api/mcp/servers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: draftMcpServer.name,
+                    command: draftMcpServer.command,
+                    args: argsList,
+                    env: envObj
+                })
+            });
+            if (res.ok) {
+                await fetchMcpServers();
+                setDraftMcpServer({ name: '', command: '', args: '', env: [] });
+                alert("Server added successfully!");
+            } else {
+                const err = await res.json();
+                alert(`Error adding server: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (e) {
+            alert("Failed to connect to server.");
+        }
+    };
+
+    const handleDeleteMcpServer = async (name: string) => {
+        if (!confirm(`Remove MCP server '${name}'?`)) return;
+        try {
+            const res = await fetch(`/api/mcp/servers/${name}`, { method: 'DELETE' });
+            if (res.ok) {
+                await fetchMcpServers();
+            } else {
+                alert("Failed to delete server.");
+            }
+        } catch (e) {
+            alert("Error deleting server.");
+        }
+    };
 
     // Handle Save Custom Tool
     const handleSaveTool = async () => {
@@ -595,6 +750,7 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
         { id: 'general', label: 'General', icon: LayoutGrid },
         { id: 'personal_details', label: 'Personal Details', icon: Shield },
         { id: 'agents', label: 'Build Agents', icon: Bot },
+        { id: 'mcp_servers', label: 'MCP Servers', icon: Server },
         { id: 'custom_tools', label: 'Tool Builder', icon: Wrench },
         { id: 'datalab', label: 'Data Lab', icon: Database },
         { id: 'models', label: 'Models', icon: Cpu },
@@ -847,18 +1003,12 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                                 <label className="text-[10px] font-bold text-zinc-500 uppercase">Capabilities (Tools)</label>
                                                                 <div className="grid grid-cols-2 gap-4">
                                                                     {(() => {
-                                                                        // Merge Built-in Capabilities with Custom Tools
-                                                                        const customCaps = customTools.map(t => ({
-                                                                            id: t.name,
-                                                                            label: t.generalName || t.name,
-                                                                            description: t.description,
-                                                                            tools: [t.name],
-                                                                            isCustom: true
-                                                                        }));
-                                                                        const allCaps = [...CAPABILITIES, ...customCaps];
+                                                                        // Use availableCapabilities which includes MCP and Custom tools
+                                                                        // Filter out duplicates if any (though grouping should handle it)
+                                                                        const allCaps = availableCapabilities;
 
                                                                         return allCaps.map(cap => {
-                                                                            const isEnabled = draftAgent.tools.includes("all") || cap.tools.every(t => draftAgent.tools.includes(t));
+                                                                            const isEnabled = draftAgent.tools.includes("all") || cap.tools.every((t: string) => draftAgent.tools.includes(t));
                                                                             return (
                                                                                 <div
                                                                                     key={cap.id}
@@ -891,7 +1041,9 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                                                                         <div className={`w-3 h-3 border ${isEnabled ? 'bg-green-500 border-green-500' : 'border-zinc-600'}`}></div>
                                                                                         <span className="text-xs font-bold text-white truncate">{cap.label}</span>
                                                                                         {/* @ts-ignore */}
-                                                                                        {cap.isCustom && <span className="text-[9px] px-1 bg-zinc-800 text-zinc-400 rounded">CUSTOM</span>}
+                                                                                        {cap.toolType === 'custom' && <span className="text-[9px] px-1 bg-zinc-800 text-zinc-400 rounded">CUSTOM</span>}
+                                                                                        {/* @ts-ignore */}
+                                                                                        {cap.toolType === 'mcp' && <span className="text-[9px] px-1 bg-blue-900/50 text-blue-400 border border-blue-900 rounded">MCP</span>}
                                                                                     </div>
                                                                                     <p className="text-[9px] text-zinc-500 mt-1 pl-5 truncate">{cap.description}</p>
                                                                                 </div>
@@ -1993,6 +2145,154 @@ export const SettingsModal = ({ isOpen, onClose, onSave, credentials, showBrowse
                                             >
                                                 Save Changes
                                             </button>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* MCP SERVERS TAB */}
+                                {activeTab === 'mcp_servers' && (
+                                    <div className="space-y-8">
+                                        <div className="mb-4">
+                                            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                                                <Server className="h-5 w-5" />
+                                                External MCP Servers
+                                            </h3>
+                                            <p className="text-zinc-500 text-sm mt-1">
+                                                Connect external Model Context Protocol (MCP) servers to extend agent capabilities with local tools, databases, and APIs.
+                                            </p>
+                                        </div>
+
+                                        {/* Connected Servers List */}
+                                        <div className="space-y-4">
+                                            <h4 className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Connected Servers</h4>
+                                            {loadingMcp ? (
+                                                <div className="text-zinc-500 text-sm italic">Loading servers...</div>
+                                            ) : mcpServers.length === 0 ? (
+                                                <div className="p-8 text-center border border-dashed border-zinc-800 rounded bg-zinc-900/30">
+                                                    <Server className="h-8 w-8 mx-auto text-zinc-700 mb-2" />
+                                                    <p className="text-zinc-500 text-sm">No servers connected.</p>
+                                                </div>
+                                            ) : (
+                                                <div className="grid gap-3">
+                                                    {mcpServers.map((server) => (
+                                                        <div key={server.name} className="flex items-center justify-between p-4 bg-zinc-900 border border-zinc-800 rounded group">
+                                                            <div className="flex flex-col gap-1">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="font-bold text-white text-sm">{server.name}</span>
+                                                                    <span className="text-[10px] bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded border border-green-500/30 uppercase">Active</span>
+                                                                </div>
+                                                                <code className="text-[10px] text-zinc-500 font-mono">
+                                                                    {server.command} {(server.args || []).join(' ')}
+                                                                </code>
+                                                            </div>
+                                                            <button 
+                                                                onClick={() => handleDeleteMcpServer(server.name)}
+                                                                className="p-2 text-zinc-600 hover:text-red-500 hover:bg-zinc-800 rounded transition-colors"
+                                                            >
+                                                                <Trash className="h-4 w-4" />
+                                                            </button>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Add Server Form */}
+                                        <div className="pt-6 border-t border-zinc-800 space-y-6">
+                                             <h4 className="text-xs uppercase font-bold text-zinc-500 tracking-wider">Add New Server</h4>
+                                             
+                                             <div className="grid grid-cols-2 gap-4">
+                                                 <div className="space-y-2">
+                                                     <label className="text-[10px] uppercase font-bold text-zinc-500">Server Name</label>
+                                                     <input 
+                                                         type="text" 
+                                                         value={draftMcpServer.name}
+                                                         onChange={e => setDraftMcpServer({...draftMcpServer, name: e.target.value})}
+                                                         className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none placeholder:text-zinc-700"
+                                                         placeholder="e.g. filesystem"
+                                                     />
+                                                 </div>
+                                                 <div className="space-y-2">
+                                                     <label className="text-[10px] uppercase font-bold text-zinc-500">Command</label>
+                                                     <input 
+                                                         type="text" 
+                                                         value={draftMcpServer.command}
+                                                         onChange={e => setDraftMcpServer({...draftMcpServer, command: e.target.value})}
+                                                         className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono placeholder:text-zinc-700"
+                                                         placeholder="e.g. npx, python3"
+                                                     />
+                                                 </div>
+                                                 <div className="col-span-2 space-y-2">
+                                                     <label className="text-[10px] uppercase font-bold text-zinc-500">Arguments</label>
+                                                     <input 
+                                                         type="text" 
+                                                         value={draftMcpServer.args}
+                                                         onChange={e => setDraftMcpServer({...draftMcpServer, args: e.target.value})}
+                                                         className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono placeholder:text-zinc-700"
+                                                         placeholder='-y @modelcontextprotocol/server-filesystem /path/to/allow'
+                                                     />
+                                                     <p className="text-[10px] text-zinc-600">Space separated arguments.</p>
+                                                 </div>
+                                             </div>
+
+                                             <div className="space-y-2">
+                                                 <div className="flex items-center justify-between">
+                                                     <label className="text-[10px] uppercase font-bold text-zinc-500">Environment Variables</label>
+                                                     <button 
+                                                         onClick={() => setDraftMcpServer({
+                                                             ...draftMcpServer, 
+                                                             env: [...draftMcpServer.env, {key: '', value: ''}]
+                                                         })}
+                                                         className="text-[10px] font-bold text-zinc-400 hover:text-white flex items-center gap-1"
+                                                     >
+                                                         <Plus className="h-3 w-3" /> ADD VAR
+                                                     </button>
+                                                 </div>
+                                                 {draftMcpServer.env.map((env, idx) => (
+                                                     <div key={idx} className="flex gap-2">
+                                                         <input 
+                                                             type="text" 
+                                                             placeholder="KEY" 
+                                                             value={env.key} 
+                                                             onChange={e => {
+                                                                 const newEnv = [...draftMcpServer.env];
+                                                                 newEnv[idx].key = e.target.value;
+                                                                 setDraftMcpServer({...draftMcpServer, env: newEnv});
+                                                             }}
+                                                             className="flex-1 bg-zinc-900 border border-zinc-800 p-2 text-xs text-white font-mono focus:border-white focus:outline-none"
+                                                         />
+                                                          <input 
+                                                             type="text" 
+                                                             placeholder="VALUE" 
+                                                             value={env.value} 
+                                                             onChange={e => {
+                                                                 const newEnv = [...draftMcpServer.env];
+                                                                 newEnv[idx].value = e.target.value;
+                                                                 setDraftMcpServer({...draftMcpServer, env: newEnv});
+                                                             }}
+                                                             className="flex-[2] bg-zinc-900 border border-zinc-800 p-2 text-xs text-white font-mono focus:border-white focus:outline-none"
+                                                         />
+                                                         <button 
+                                                            onClick={() => {
+                                                                const newEnv = draftMcpServer.env.filter((_, i) => i !== idx);
+                                                                setDraftMcpServer({...draftMcpServer, env: newEnv});
+                                                            }}
+                                                            className="p-2 text-zinc-600 hover:text-red-500"
+                                                         >
+                                                             <Trash className="h-4 w-4" />
+                                                         </button>
+                                                     </div>
+                                                 ))}
+                                             </div>
+
+                                             <div className="flex justify-end pt-4">
+                                                 <button 
+                                                     onClick={handleAddMcpServer}
+                                                     className="px-6 py-2 bg-white text-black text-sm font-bold hover:bg-zinc-200 transition-colors"
+                                                 >
+                                                     Connect Server
+                                                 </button>
+                                             </div>
                                         </div>
                                     </div>
                                 )}

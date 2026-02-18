@@ -10,6 +10,7 @@ backend/venv/
 backend/data/chroma_db/
 backend/data/settings.json
 backend/data/personal_details.json
+backend/data/mcp_servers.json
 !backend/data/user_agents.json
 !backend/data/custom_tools.json
 
