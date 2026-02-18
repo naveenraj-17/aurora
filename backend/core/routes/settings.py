@@ -1,0 +1,304 @@
+"""
+Settings, personal details, Google Maps, and config endpoints.
+"""
+import os
+import json
+from typing import Optional, Tuple
+from urllib.parse import quote
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
+import httpx
+
+from core.config import load_settings, SETTINGS_FILE
+from core.models import Settings, PersonalDetails, MapsDetailsRequest
+from core.personal_details import load_personal_details, save_personal_details
+from core.llm_providers import _make_aws_client, OLLAMA_MODEL
+from services.n8n_sync import sync_global_config, fetch_global_config
+
+router = APIRouter()
+
+# File paths
+CREDENTIALS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "credentials.json")
+TOKEN_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "token.json")
+
+
+def save_settings(settings: dict):
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(settings, f, indent=4)
+
+
+def _init_memory_store(settings: dict):
+    """Initialize the long-term memory store with an embedding provider consistent with settings."""
+    try:
+        from core.memory import MemoryStore as _MemoryStore
+    except ImportError:
+        return None
+
+    mode = (settings.get("mode") or "local").strip().lower()
+    model = (settings.get("model") or OLLAMA_MODEL).strip() or OLLAMA_MODEL
+
+    # Default: Ollama embeddings (MemoryStore will handle it).
+    embed_fn = None
+
+    # Bedrock mode: use a Bedrock embedding model instead of Ollama.
+    if mode == "bedrock":
+        region = (settings.get("aws_region") or "us-east-1").strip() or "us-east-1"
+        embed_model_id = (settings.get("embedding_model") or "amazon.titan-embed-text-v2:0").strip()
+
+        def _bedrock_embed(text: str):
+            bedrock = _make_aws_client("bedrock-runtime", region, settings)
+            payload = {"inputText": text}
+            resp = bedrock.invoke_model(
+                modelId=embed_model_id,
+                body=json.dumps(payload).encode("utf-8"),
+                accept="application/json",
+                contentType="application/json",
+            )
+            body = resp.get("body")
+            data = json.loads(body.read()) if body else {}
+            emb = data.get("embedding")
+            return emb if isinstance(emb, list) else None
+
+        embed_fn = _bedrock_embed
+
+    return _MemoryStore(model=model, embed_fn=embed_fn)
+
+
+def _normalize_point(address: Optional[str], lat: Optional[float], lng: Optional[float]) -> Tuple[str, dict]:
+    """Return (distance-matrix-string, meta) or raise HTTPException for invalid input."""
+    addr = (address or "").strip()
+    has_coords = lat is not None and lng is not None
+    if addr and has_coords:
+        return f"{lat},{lng}", {"type": "latlng", "address": addr, "location": {"lat": lat, "lng": lng}}
+    if has_coords:
+        return f"{lat},{lng}", {"type": "latlng", "location": {"lat": lat, "lng": lng}}
+    if addr:
+        return addr, {"type": "address", "address": addr}
+    raise HTTPException(status_code=422, detail="Both origin and destination must be provided as an address or as lat/lng.")
+
+
+def _build_directions_url(origin: str, destination: str, travel_mode: str) -> str:
+    return (
+        "https://www.google.com/maps/dir/?api=1"
+        f"&origin={quote(origin)}"
+        f"&destination={quote(destination)}"
+        f"&travelmode={quote(travel_mode)}"
+    )
+
+
+# --- Status & Settings ---
+
+@router.get("/api/status")
+async def get_status():
+    from core.routes.agents import load_user_agents, active_agent_id
+
+    user_agents = load_user_agents()
+    agents_status = {}
+    for a in user_agents:
+        agents_status[a["id"]] = {"name": a["name"], "status": "online"}
+
+    current_settings = load_settings()
+
+    return {
+        "agents": agents_status,
+        "active_agent_id": active_agent_id,
+        "overall": "operational",
+        "model": current_settings.get("model", "mistral"),
+        "mode": current_settings.get("mode", "local")
+    }
+
+
+@router.get("/api/settings")
+async def get_settings():
+    settings = load_settings()
+    try:
+        settings = await fetch_global_config(settings)
+    except Exception as e:
+        print(f"Warning: Failed to fetch n8n config: {e}")
+    return settings
+
+
+@router.post("/api/settings")
+async def update_settings(settings: Settings):
+    print(f"DEBUG: update_settings called with: {settings.dict()}")
+    data = settings.dict()
+
+    # Sync with n8n if configured
+    try:
+        data = await sync_global_config(data)
+    except Exception as e:
+        print(f"Error syncing with n8n: {e}")
+
+    save_settings(data)
+
+    # Reinitialize memory so embeddings provider matches the new mode.
+    import core.server as _server
+    try:
+        from core.memory import MemoryStore as _MemoryStore
+    except ImportError:
+        _MemoryStore = None
+    
+    if _MemoryStore:
+        try:
+            _server.memory_store = _init_memory_store(data)
+        except Exception as e:
+            print(f"Warning: failed to reinitialize MemoryStore after settings update: {e}")
+    return data
+
+
+# --- Personal Details ---
+
+@router.get("/api/personal-details")
+async def get_personal_details_api():
+    return load_personal_details()
+
+
+@router.post("/api/personal-details")
+async def update_personal_details_api(details: PersonalDetails):
+    data = details.dict()
+    return save_personal_details(data)
+
+
+# --- Maps ---
+
+@router.post("/api/maps/details")
+async def get_maps_details(request: MapsDetailsRequest):
+    """Compute distance and duration between two points using Google Distance Matrix API."""
+    settings = load_settings()
+    api_key = (settings.get("google_maps_api_key") or os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="google_maps_api_key is not configured")
+
+    origin_str, origin_meta = _normalize_point(request.origin_address, request.origin_lat, request.origin_lng)
+    dest_str, dest_meta = _normalize_point(request.destination_address, request.destination_lat, request.destination_lng)
+
+    url = "https://maps.googleapis.com/maps/api/distancematrix/json"
+    params = {
+        "origins": origin_str,
+        "destinations": dest_str,
+        "mode": request.travel_mode,
+        "units": request.units,
+        "key": api_key,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(url, params=params)
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Google Maps API returned non-JSON response (status {resp.status_code})")
+
+    api_status = data.get("status")
+    if api_status != "OK":
+        message = data.get("error_message") or api_status or "Unknown error"
+        raise HTTPException(status_code=502, detail=f"Google Distance Matrix error: {message}")
+
+    rows = data.get("rows") or []
+    elements = (rows[0].get("elements") if rows and isinstance(rows[0], dict) else None) or []
+    element = elements[0] if elements else {}
+    element_status = element.get("status")
+    if element_status != "OK":
+        raise HTTPException(status_code=502, detail=f"No route found: {element_status}")
+
+    distance = element.get("distance") or {}
+    duration = element.get("duration") or {}
+    distance_m = distance.get("value")
+    duration_s = duration.get("value")
+
+    directions_url = _build_directions_url(origin_str, dest_str, request.travel_mode)
+
+    return {
+        "provider": "google_distance_matrix",
+        "travel_mode": request.travel_mode,
+        "units": request.units,
+        "origin": origin_meta,
+        "destination": dest_meta,
+        "distance": {
+            "meters": distance_m,
+            "kilometers": (distance_m / 1000.0) if isinstance(distance_m, (int, float)) else None,
+            "text": distance.get("text"),
+        },
+        "duration": {
+            "seconds": duration_s,
+            "minutes": (duration_s / 60.0) if isinstance(duration_s, (int, float)) else None,
+            "text": duration.get("text"),
+        },
+        "directions_url": directions_url,
+    }
+
+
+# --- Google Credentials & Config ---
+
+@router.post("/api/setup/google-credentials")
+async def upload_google_creds(request: Request):
+    try:
+        data = await request.json()
+        print(f"DEBUG: Received credentials upload (Type: {type(data)})")
+
+        if isinstance(data, str):
+            parsed = json.loads(data)
+        else:
+            parsed = data
+
+        with open(CREDENTIALS_FILE, 'w') as f:
+            json.dump(parsed, f, indent=4)
+
+        return {"status": "success", "message": "Credentials saved successfully."}
+    except Exception as e:
+        print(f"Error saving credentials: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+
+@router.post("/api/setup/google-token")
+async def upload_google_token(request: Request):
+    try:
+        data = await request.json()
+        print(f"DEBUG: Received token upload (Type: {type(data)})")
+
+        if isinstance(data, str):
+            parsed = json.loads(data)
+        else:
+            parsed = data
+
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump(parsed, f, indent=4)
+
+        return {"status": "success", "message": "Token saved successfully."}
+    except Exception as e:
+        print(f"Error saving token: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+
+
+@router.get("/api/config")
+async def get_config():
+    if not os.path.exists(CREDENTIALS_FILE):
+        return {"error": "Credentials not found"}
+
+    try:
+        with open(CREDENTIALS_FILE, 'r') as f:
+            creds = json.load(f)
+            app_info = creds.get("web") or creds.get("installed", {})
+
+            return {
+                "client_id": app_info.get("client_id", "")[:10] + "..." + app_info.get("client_id", "")[-10:],
+                "project_id": app_info.get("project_id", ""),
+                "auth_uri": app_info.get("auth_uri", ""),
+                "token_uri": app_info.get("token_uri", "")
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/api/file")
+async def get_file(path: str):
+    """
+    Serve a local file.
+    SECURITY WARNING: In a production app, this MUST validate 'path'
+    to prevent Directory Traversal attacks. For this local POC/agent,
+    we allow reading user files.
+    """
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(path)

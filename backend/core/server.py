@@ -4,7 +4,8 @@ import json
 import asyncio
 import traceback
 import time
-print("🔥🔥🔥 SERVER.PY LOADED - VERSION WITH RAG DEBUGGING 🔥🔥🔥")
+import re
+print("🔥🔥🔥 SERVER.PY LOADED - REFACTORED VERSION 🔥🔥🔥")
 from typing import List, Dict, Any, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
@@ -30,6 +31,41 @@ except ImportError:
 
 from core.mcp_client import MCPClientManager
 
+# --- Refactored Module Imports ---
+from core.models import (
+    ChatRequest, ChatResponse, Settings, PersonalDetails,
+    MapsDetailsRequest, Agent, AgentActiveRequest, AddMCPServerRequest,
+    GoogleCredsRequest, PersonalAddress,
+)
+from core.session import (
+    conversation_histories, session_state,
+    _get_session_id, _get_conversation_history, _get_session_state,
+    _apply_sticky_args, _clear_session_context, _extract_and_persist_ids,
+    get_recent_history_messages,
+)
+from core.llm_providers import (
+    generate_response as _generate_response,
+    _make_aws_client, _messages_to_transcript,
+    OLLAMA_BASE_URL as _OLLAMA_BASE_URL,
+)
+from core.tools import (
+    NATIVE_TOOL_SYSTEM_PROMPT, TOOL_USAGE_INSTRUCTION,
+    VirtualTool, build_virtual_tools, aggregate_all_tools,
+    build_system_prompt,
+)
+# Route routers
+from core.routes.auth import router as auth_router
+from core.routes.settings import router as settings_router
+from core.routes.agents import router as agents_router
+from core.routes.agents import (
+    load_user_agents, save_user_agents, get_active_agent_data,
+    active_agent_id,
+)
+from core.routes.tools import router as tools_router
+from core.routes.tools import load_custom_tools, save_custom_tools
+from core.routes.n8n import router as n8n_router
+from core.routes.data import router as data_router
+
 # Configuration
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 MAX_TURNS = 15  # Maximum ReAct loop iterations
@@ -52,19 +88,8 @@ AGENTS = {
     "xlsx_parser": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "xlsx_parser.py"),
 }
 
-class ChatRequest(BaseModel):
-    message: str
-    # Client-generated ID for scoping short-term context. Frontend should generate a new
-    # one on each reload so each tab/reload is a fresh session.
-    session_id: str | None = None
-    # Optional ephemeral client-side state we want the server/agent to reuse.
-    client_state: dict[str, Any] | None = None
-
-class ChatResponse(BaseModel):
-    response: str
-    intent: str = "chat" # chat, list_emails, render_email, list_files, list_events, request_auth, list_local_files, render_local_file
-    data: Any | None = None
-    tool_name: str | None = None
+# --- Models imported from core.models ---
+# ChatRequest, ChatResponse, Settings, PersonalDetails, etc.
 
 # Global variables
 # Map of client_name -> session
@@ -75,196 +100,14 @@ exit_stack = None
 memory_store = None
 mcp_manager: Optional[MCPClientManager] = None
 
-from collections import deque
+# --- Session management imported from core.session ---
+# _get_session_id, _get_conversation_history, _get_session_state,
+# _apply_sticky_args, _clear_session_context, _extract_and_persist_ids,
+# get_recent_history_messages
 
-# Session-scoped short-term history/state. We intentionally do NOT persist these across reloads;
-# the frontend should create a new session_id on page load.
-conversation_histories: dict[str, deque] = {}
-session_state: dict[str, dict[str, Any]] = {}
-
-def _get_session_id(request: ChatRequest) -> str:
-    return request.session_id or "default"
-
-def _get_conversation_history(session_id: str) -> deque:
-    if session_id not in conversation_histories:
-        conversation_histories[session_id] = deque(maxlen=10)
-    return conversation_histories[session_id]
-
-def _get_session_state(session_id: str) -> dict[str, Any]:
-    if session_id not in session_state:
-        session_state[session_id] = {}
-    return session_state[session_id]
-
-
-def _apply_sticky_args(session_id: str, tool_name: str, tool_args: Any, tool_schema: dict | None = None) -> Any:
-    """
-    SIMPLIFIED Argument Persistence.
-    
-    Only injects client_state (URL params from frontend).
-    Session context is provided via vector DB and system prompt injection.
-    
-    This prevents parameters from bleeding across different flows.
-    Use clear_session_context tool to manage session lifecycle.
-    """
-    if not isinstance(tool_args, dict):
-        tool_args = {}
-
-    # Note: client_state is merged into session_state at request start (line ~1046)
-    # We don't auto-inject from session_state here anymore
-    # The LLM gets context via system prompt injection instead
-    
-    # Keep args in session for tracking (but don't auto-inject)
-    ss = _get_session_state(session_id)
-    for k, v in tool_args.items():
-        if v and isinstance(v, (str, int, float, bool)):
-            ss[k] = v
-
-    return tool_args
-
-
-
-
-def _clear_session_context(session_id: str, scope: str = "transient") -> list:
-    """
-    Clear session state based on scope.
-    
-    Scopes:
-        - "transient": Clear flow-specific data (dimensions, IDs) but keep facility_id/location
-        - "all": Clear everything
-        - "ids_only": Clear only fields ending with _id
-    
-    Returns list of cleared keys.
-    """
-    ss = _get_session_state(session_id)
-    cleared = []
-    
-    if scope == "all":
-        cleared = list(ss.keys())
-        ss.clear()
-        print(f"DEBUG: Cleared ALL session context: {cleared}")
-        
-        # NEW: Clear session-scoped embeddings
-        memory_store.clear_session_embeddings(session_id)
-        cleared.append("session_embeddings")
-        
-    elif scope == "transient":
-        # Clear everything except facility_id and location (persistent context)
-        persistent = {"facility_id", "location"}
-        to_remove = [k for k in ss.keys() if k not in persistent]
-        for k in to_remove:
-            del ss[k]
-            cleared.append(k)
-        print(f"DEBUG: Cleared TRANSIENT session context: {cleared}")
-        
-        # NEW: Also clear session embeddings on transient cleanup
-        memory_store.clear_session_embeddings(session_id)
-        cleared.append("session_embeddings")
-        
-    elif scope == "ids_only":
-        # Clear only fields ending with _id or Id
-        to_remove = [k for k in ss.keys() if k.endswith("_id") or k.endswith("Id")]
-        for k in to_remove:
-            del ss[k]
-            cleared.append(k)
-        print(f"DEBUG: Cleared ID fields from session context: {cleared}")
-    else:
-        print(f"DEBUG: Unknown scope '{scope}', no context cleared")
-    
-    return cleared
-
-
-def _extract_and_persist_ids(session_id: str, tool_name: str, tool_output: str):
-    """
-    Extract IDs from tool output and persist to session state.
-    ID-AGNOSTIC: Automatically detects any field ending with '_id' or 'Id'.
-    Works for any agent/tool without hardcoded mappings.
-    """
-    try:
-        parsed = json.loads(tool_output)
-        
-        ss = _get_session_state(session_id)
-        
-        def _extract_ids_recursive(data: Any, prefix: str = ""):
-            """Recursively extract ID fields from nested dictionaries and lists."""
-            
-            if isinstance(data, dict):
-                for key, value in data.items():
-                    # Check if this looks like an ID field
-                    is_id_field = (
-                        key.endswith("_id") or 
-                        key.endswith("Id") or 
-                        key.lower() in ["id", "uuid"]
-                    )
-                    
-                    if is_id_field and value is not None and value != "":
-                        # Store with original key (not prefixed) for easy access
-                        # We overwrite previous values, which effectively means "last seen ID wins"
-                        ss[key] = value
-                        print(f"DEBUG: Persisted {key}={value} to session state (from tool: {tool_name})")
-                    
-                    # Recurse into nested dicts
-                    elif isinstance(value, (dict, list)):
-                        _extract_ids_recursive(value, prefix=key)
-            
-            elif isinstance(data, list):
-                # If list has items, verify they are dicts or lists
-                # We prioritize the FIRST item for ID extraction if it's a single item list
-                # Or if it's a list of results, the first result usually contains the relevant context ID
-                if len(data) > 0:
-                    # Strategy: Always extract from the FIRST item deeply
-                    # This ensures if we get [Obj1, Obj2], we at least get Obj1's IDs.
-                    # This matches "Single Item Array" requirement perfectly.
-                    if isinstance(data[0], (dict, list)):
-                         _extract_ids_recursive(data[0], prefix=f"{prefix}[0]")
-
-        _extract_ids_recursive(parsed)
-        
-    except Exception as e:
-        print(f"DEBUG: Could not extract IDs from tool output: {e}")
-
-# System Prompt for Native Tool Calling (Enterprise/Business Focused)
-NATIVE_TOOL_SYSTEM_PROMPT = """You are the Enterprise Business Intelligence Agent for a SaaS Platform.
-Your mission is to assist managers, executives, and developers by retrieving accurate data, managing system operations, and explaining technical documentation.
-
-### CURRENT DATE & TIME CONTEXT
-**Current Date:** {current_date}
-**Current Time:** {current_time}
-**Timezone:** {timezone}
-
-**IMPORTANT:** When tools return dates or timestamps, DO NOT add your own temporal context (e.g., "2 years from now", "next week"). Simply present the date/time returned by the tool. If you need to calculate relative time, use the appropriate tool or state the exact difference in days/weeks/months by doing simple math with the current date above.
-
-### CORE OPERATING RULES
-1.  **Think Step-by-Step:** Before calling a tool, briefly analyze the user's request. Determine if you need to fetch a list (IDs) before you can act on a specific item.
-2.  **Accuracy First:** Never guess IDs (e.g., `item_123`, `email_999`). Always use `list_` or `search_` tools to find the real ID first.
-3.  **Data Integrity:** When summarizing data (revenue, counts), be precise. Do not round numbers unless asked.
-4.  **Security:** You are operating in a secure environment. You can access internal APIs and Databases via provided tools.
-
-### TOOL USAGE PROTOCOL
-*   **Listing vs. Acting:** If the user says "Email the last user", you MUST first call `list_users` or `get_recent_...` to get the email address. You cannot email a "concept".
-*   **Parameters:**
-    *   `limit`: Default to 5 unless specified (e.g., "all" -> 100).
-    *   `query`: Convert natural language to search terms (e.g., "urgent" -> "is:urgent").
-    *   **Geolocation:** If you have latitude/longitude from a previous tool (e.g., `get_facilities`), ALWAYS use `origin_lat`/`origin_lng` arguments instead of addresses. This avoids geocoding errors.
-
-### TOOLS
-You have access to the following tools:
-{tools_json}
-
-### RESPONSE STYLE
-*   **Business Professional:** Be concise. No fluff.
-*   **Action-Oriented:** If a task is done, say it. If data is retrieved, present it clearly (tables/lists).
-"""
-
-def get_recent_history_messages(session_id: str):
-    """Returns a list of message dicts for the chat API."""
-    messages = []
-    for turn in _get_conversation_history(session_id):
-        messages.append({"role": "user", "content": turn['user']})
-        # If tools were used, we should ideally represent them, but for now 
-        # let's represent the final assistant response to keep context usage expected.
-        # Future improvement: Store full turn history including tool_calls and tool_outputs.
-        messages.append({"role": "assistant", "content": turn['assistant']})
-    return messages
+# --- System prompt imported from core.tools ---
+# NATIVE_TOOL_SYSTEM_PROMPT, TOOL_USAGE_INSTRUCTION, VirtualTool,
+# build_virtual_tools, aggregate_all_tools, build_system_prompt
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -351,6 +194,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Include Refactored Route Routers ---
+# These routers contain the extracted API endpoints from this file.
+# NOTE: The inline endpoint definitions below are kept for now as fallbacks.
+# In a future cleanup pass, the inline duplicates should be removed entirely
+# once the routed versions are verified to work correctly.
+app.include_router(auth_router)
+app.include_router(settings_router)
+app.include_router(agents_router)
+app.include_router(tools_router)
+app.include_router(n8n_router)
+app.include_router(data_router)
 
 # --- Auth Endpoints ---
 @app.get("/auth/login")
