@@ -11,6 +11,9 @@ class ChatRequest(BaseModel):
     # Client-generated ID for scoping short-term context. Frontend should generate a new
     # one on each reload so each tab/reload is a fresh session.
     session_id: str | None = None
+    # The active agent ID — sent by the frontend on every request so the backend
+    # doesn't rely on the global variable (which resets on uvicorn reload).
+    agent_id: str | None = None
     # Optional ephemeral client-side state we want the server/agent to reuse.
     client_state: dict[str, Any] | None = None
 

@@ -82,7 +82,7 @@ export const McpServersTab = ({
                          value={draftMcpServer.command}
                          onChange={e => setDraftMcpServer({...draftMcpServer, command: e.target.value})}
                          className="w-full bg-zinc-900 border border-zinc-800 p-2 text-sm text-white focus:border-white focus:outline-none font-mono placeholder:text-zinc-700"
-                         placeholder="e.g. npx, python3"
+                         placeholder="e.g. npx, uvx, python3"
                      />
                  </div>
                  <div className="col-span-2 space-y-2">

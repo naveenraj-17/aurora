@@ -106,7 +106,7 @@ class MemoryStore:
 
     def add_tool_execution(self, session_id: str, tool_name: str, 
                            tool_args: dict, tool_output: str, 
-                           timestamp: str = None):
+                           timestamp: str = None, agent_id: str = None):
         """Store tool execution details for session-scoped retrieval.
         
         ID-AGNOSTIC: Automatically extracts any field ending with '_id' or 'Id'
@@ -122,6 +122,8 @@ class MemoryStore:
             "tool_name": tool_name,
             "timestamp": timestamp or datetime.now().isoformat()
         }
+        if agent_id:
+            metadata["agent_id"] = agent_id
         
         # Add parsed IDs as metadata for easy retrieval (ID-AGNOSTIC)
         try:
@@ -144,14 +146,27 @@ class MemoryStore:
         self.add_memory("tool", content, metadata)
 
     def get_session_tool_outputs(self, session_id: str, tool_name: str = None, 
-                                 n_results: int = 10):
+                                 n_results: int = 10, agent_id: str = None):
         """Retrieve recent tool outputs for the current session.
         
         Returns tool execution records with extracted IDs available in metadata.
+        Optionally filtered by agent_id for agent-scoped isolation.
         """
-        where_filter = {"session_id": session_id, "type": "tool_execution"}
+        # Build filter conditions — ChromaDB requires $and for 3+ conditions
+        conditions = [
+            {"session_id": session_id},
+            {"type": "tool_execution"},
+        ]
         if tool_name:
-            where_filter["tool_name"] = tool_name
+            conditions.append({"tool_name": tool_name})
+        if agent_id:
+            conditions.append({"agent_id": agent_id})
+        
+        # ChromaDB: 1 condition = flat dict, 2+ conditions = $and
+        if len(conditions) == 1:
+            where_filter = conditions[0]
+        else:
+            where_filter = {"$and": conditions}
         
         try:
             # Query by metadata filter

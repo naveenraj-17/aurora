@@ -1,4 +1,4 @@
-import os.path
+import os
 import base64
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -44,7 +44,22 @@ def get_google_credentials():
 def get_auth_url(redirect_uri):
     """Generates the OAuth2 authorization URL."""
     if not os.path.exists(CREDENTIALS_FILE):
-         raise FileNotFoundError("credentials.json not found.")
+         # Create a dummy credentials file to prevent crash and show Google error
+         dummy_creds = {
+             "installed": {
+                 "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+                 "project_id": "YOUR_PROJECT_ID",
+                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                 "token_uri": "https://oauth2.googleapis.com/token",
+                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                 "client_secret": "YOUR_CLIENT_SECRET",
+                 "redirect_uris": [redirect_uri]
+             }
+         }
+         os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
+         import json
+         with open(CREDENTIALS_FILE, 'w') as f:
+             json.dump(dummy_creds, f, indent=4)
 
     flow = InstalledAppFlow.from_client_secrets_file(
         CREDENTIALS_FILE, SCOPES, redirect_uri=redirect_uri

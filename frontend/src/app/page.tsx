@@ -17,7 +17,7 @@ import { renderTextContent, cn } from '@/lib/utils';
 import { Message, SystemStatus } from '@/types';
 
 export default function Home() {
-  const [sessionId] = useState(() => {
+  const [sessionId, setSessionId] = useState(() => {
     const c: any = (globalThis as any).crypto;
     if (c?.randomUUID) return c.randomUUID();
     return `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -35,6 +35,7 @@ export default function Home() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [streamingActivity, setStreamingActivity] = useState<string | null>(null);
+  const [currentAgentId, setCurrentAgentId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -54,6 +55,7 @@ export default function Home() {
         const info = d.agents[d.active_agent_id];
         const name = typeof info === 'string' ? d.active_agent_id : info.name;
         setAgentName(name);
+        setCurrentAgentId(d.active_agent_id);
       }
     }).catch(console.error);
   };
@@ -96,12 +98,19 @@ export default function Home() {
         const statusRes = await fetch('/api/status');
         const statusData = await statusRes.json();
         setSystemStatus(statusData);
+        const name = statusData.agents[agentId]?.name || agentId;
         if (statusData.agents[agentId]) {
-          setAgentName(statusData.agents[agentId].name);
+          setAgentName(name);
         }
+        setCurrentAgentId(agentId);
 
-        // Optional: Add a system message saying "Switched to X"
-        setMessages(prev => [...prev, { role: 'assistant', content: `System: Switched active agent to ${statusData.agents[agentId]?.name || agentId}. Ready.` }]);
+        // Generate new session for the new agent — isolates context
+        const c: any = (globalThis as any).crypto;
+        const newSessionId = c?.randomUUID?.() ?? `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        setSessionId(newSessionId);
+
+        // Clear chat messages for clean agent context
+        setMessages([{ role: 'assistant', content: `System: Switched to ${name}. Ready.` }]);
       }
     } catch (e) {
       console.error("Failed to switch agent", e);
@@ -228,7 +237,7 @@ export default function Home() {
       fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: content, session_id: sessionId }),
+        body: JSON.stringify({ message: content, session_id: sessionId, agent_id: currentAgentId }),
       })
         .then(async (response) => {
           if (!response.ok) {
@@ -348,29 +357,29 @@ export default function Home() {
           <div className='w-full md:max-w-5xl mx-auto h-full flex items-center justify-between'>
             <div className="flex items-center gap-3">
               <div className="h-3 w-3 bg-green-500 rounded-full animate-pulse shadow-[0_0_10px_#22c55e]"></div>
-              <h1 className="text-sm font-bold tracking-widest uppercase text-zinc-300">
-                {agentName} <span className="text-zinc-600">-</span> <span className="text-zinc-500">Ask Anything</span>
+              <h1 className="text-base font-bold tracking-widest uppercase text-zinc-100">
+                {agentName} <span className="text-zinc-500">-</span> <span className="text-zinc-400">Ask Anything</span>
               </h1>
             </div>
             <div className="flex items-center">
               {/* Mode & Model Info */}
-              <div className="hidden md:flex items-center gap-4 text-[10px] text-zinc-500 uppercase tracking-wider border-r border-zinc-800 pr-4">
+              <div className="hidden md:flex items-center gap-4 text-xs text-zinc-400 uppercase tracking-wider border-r border-zinc-800 pr-4">
                 <div className="flex items-center gap-2">
-                  <span className="text-zinc-600">Mode:</span>
+                  <span className="text-zinc-400">Mode:</span>
                   <span className={cn("font-bold", systemStatus?.mode === 'cloud' ? "text-blue-400" : "text-green-400")}>
                     {systemStatus?.mode || 'Loading...'}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-zinc-600">Model:</span>
-                  <span className="text-zinc-300">{systemStatus?.model || 'Loading...'}</span>
+                  <span className="text-zinc-400">Model:</span>
+                  <span className="text-zinc-200">{systemStatus?.model || 'Loading...'}</span>
                 </div>
               </div>
 
               {/* Status Indicators */}
               {/* Agents Hover Status */}
               <div className="group relative flex items-center gap-2 cursor-pointer border-r border-zinc-800 pl-4 pr-4 hover:bg-zinc-900 transition-colors">
-                <span className="text-[10px] font-bold text-zinc-500 tracking-widest uppercase group-hover:text-zinc-300 transition-colors">AGENTS</span>
+                <span className="text-xs font-bold text-zinc-400 tracking-widest uppercase group-hover:text-zinc-200 transition-colors">AGENTS</span>
 
                 {/* Dropdown on Hover */}
                 <div className="absolute right-0 top-full mt-0 w-64 bg-zinc-950 border border-zinc-800 p-2 shadow-2xl opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all pointer-events-none group-hover:pointer-events-auto z-50">
@@ -386,8 +395,8 @@ export default function Home() {
                           key={id}
                           onClick={() => handleSwitchAgent(id)}
                           className={cn(
-                            "nav-button w-full flex items-center justify-between px-3 py-2 text-[10px] uppercase tracking-wider text-left border border-transparent hover:border-zinc-700 transition-all",
-                            isActive ? "bg-zinc-900 text-white border-zinc-800" : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50"
+                            "nav-button w-full flex items-center justify-between px-3 py-2 text-xs uppercase tracking-wider text-left border border-transparent hover:border-zinc-700 transition-all",
+                            isActive ? "bg-zinc-900 text-white border-zinc-800" : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/50"
                           )}>
                           <div className="flex items-center gap-2">
                             <div className={cn("h-1.5 w-1.5 rounded-full", status === 'online' ? "bg-green-500 shadow-[0_0_5px_#22c55e]" : "bg-red-500")}></div>
@@ -398,7 +407,7 @@ export default function Home() {
                       );
                     })}
                     {(!systemStatus?.agents || Object.keys(systemStatus.agents).length === 0) && (
-                      <div className="text-[10px] text-zinc-600 italic px-3 py-2">No agents detected.</div>
+                      <div className="text-xs text-zinc-500 italic px-3 py-2">No agents detected.</div>
                     )}
                   </div>
                 </div>
@@ -441,20 +450,20 @@ export default function Home() {
 
                 <div className="flex flex-col flex-1 min-w-0 gap-2">
                   <div className={cn(
-                    "p-4 text-sm leading-relaxed border relative",
+                    "p-4 text-[15px] leading-7 border relative font-sans",
                     msg.role === 'user'
                       ? "bg-zinc-900 border-zinc-800 text-zinc-100 self-end max-w-[80%]"
                       : "bg-zinc-900/50 border-zinc-800 text-zinc-100 self-start max-w-full"
                   )}>
                     {/* Intent Indicator for Assistant */}
                     {msg.role === 'assistant' && msg.intent && (
-                      <div className="absolute -top-3 left-2 bg-zinc-950 border border-zinc-800 px-2 py-0.5 text-[8px] uppercase tracking-wider text-zinc-500">
+                      <div className="absolute -top-3 left-2 bg-zinc-950 border border-zinc-800 px-2 py-0.5 text-[10px] uppercase tracking-wider text-zinc-400 font-mono">
                         {msg.intent.replaceAll('_', ' ')} Operation
                       </div>
                     )}
 
                     {/* Content */}
-                    <div className="prose prose-invert max-w-none text-zinc-100 font-medium">
+                    <div className="prose prose-invert max-w-none text-zinc-100 font-normal">
                       {renderTextContent(msg.content)}
                     </div>
                   </div>
@@ -544,20 +553,20 @@ export default function Home() {
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={isLoading ? "Agent is processing..." : "Enter command..."}
                 disabled={isLoading}
-                className="flex-1 bg-transparent p-4 text-sm focus:outline-none font-mono text-white placeholder:text-zinc-600"
+                className="flex-1 bg-transparent p-4 text-sm focus:outline-none font-mono text-white placeholder:text-zinc-500"
                 autoFocus
               />
               <button
                 type="submit"
                 disabled={isLoading || !input.trim()}
-                className="p-4 md:px-6 bg-zinc-900 border-l border-zinc-700 text-zinc-400 font-bold text-xs uppercase hover:bg-zinc-800 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                className="p-4 md:px-6 bg-zinc-900 border-l border-zinc-700 text-zinc-300 font-bold text-xs uppercase font-mono hover:bg-zinc-800 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 <span className="hidden md:inline">Execute</span>
                 <Send className="h-4 w-4 md:hidden" />
               </button>
             </form>
             <div className="text-center mt-2">
-              <p className="text-[10px] text-zinc-600 uppercase tracking-widest">
+              <p className="text-xs text-zinc-500 uppercase tracking-widest font-mono">
                 System Active // Ready for Input
               </p>
             </div>

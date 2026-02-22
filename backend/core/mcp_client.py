@@ -78,10 +78,21 @@ class MCPClientManager:
 
     async def add_server(self, name: str, command: str, args: List[str], env: Dict[str, str] = None):
         """Add a new server configuration and connect to it."""
+        import shutil
+        
         # Check if exists
         for s in self.servers_config:
             if s["name"] == name:
                 raise ValueError(f"Server with name '{name}' already exists.")
+
+        # Check if command is installed
+        if shutil.which(command) is None:
+            if command == "uvx":
+                raise ValueError(f"Command '{command}' not found. Please install uv (e.g., curl -LsSf https://astral.sh/uv/install.sh | sh).")
+            elif command == "npx":
+                raise ValueError(f"Command '{command}' not found. Please install Node.js/npm.")
+            else:
+                raise ValueError(f"Command '{command}' not found in system PATH. Please install it first.")
 
         new_config = {
             "name": name,

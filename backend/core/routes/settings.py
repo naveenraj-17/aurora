@@ -285,7 +285,8 @@ async def get_config():
                 "client_id": app_info.get("client_id", "")[:10] + "..." + app_info.get("client_id", "")[-10:],
                 "project_id": app_info.get("project_id", ""),
                 "auth_uri": app_info.get("auth_uri", ""),
-                "token_uri": app_info.get("token_uri", "")
+                "token_uri": app_info.get("token_uri", ""),
+                "is_connected": os.path.exists(TOKEN_FILE)
             }
     except Exception as e:
         return {"error": str(e)}

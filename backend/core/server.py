@@ -5,7 +5,6 @@ import asyncio
 import traceback
 import time
 import re
-print("🔥🔥🔥 SERVER.PY LOADED - REFACTORED VERSION 🔥🔥🔥")
 from typing import List, Dict, Any, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
@@ -44,9 +43,10 @@ from core.session import (
     get_recent_history_messages,
 )
 from core.llm_providers import (
-    generate_response as _generate_response,
+    generate_response as llm_generate_response,
+    call_openai, call_anthropic, call_gemini, call_bedrock,
     _make_aws_client, _messages_to_transcript,
-    OLLAMA_BASE_URL as _OLLAMA_BASE_URL,
+    OLLAMA_BASE_URL as LLM_OLLAMA_BASE_URL,
 )
 from core.tools import (
     NATIVE_TOOL_SYSTEM_PROMPT, TOOL_USAGE_INSTRUCTION,
@@ -74,10 +74,10 @@ REDIRECT_URI = "http://localhost:3000/auth/callback"
 
 # Agent Configuration
 AGENTS = {
-    "gmail": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "gmail.py"),
+    # "gmail": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "gmail.py"),
     "time": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "time.py"),
-    "drive": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "drive.py"),
-    "calendar": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "calendar_agent.py"),
+    # "drive": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "drive.py"),
+    # "calendar": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "calendar_agent.py"),
     "local_file_agent": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "local_file.py"),
     "browser": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "browser.py"),
     "sql": os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "sql_agent.py"),
@@ -500,77 +500,7 @@ def _build_directions_url(origin: str, destination: str, travel_mode: str) -> st
     )
 
 
-def _make_aws_client(service_name: str, region: str, settings: dict):
-    """Create a boto3 client.
-
-    If access/secret are not provided, boto3 will use its default credential chain
-    (env vars, AWS_PROFILE, SSO, instance role, etc.).
-    """
-    # Amazon Bedrock API keys can be provided as a bearer token via this env var.
-    # See: https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html
-    bedrock_api_key = (settings.get("bedrock_api_key") or "").strip()
-    # Users often paste a full header value. Normalize to the raw ABSK... token.
-    if bedrock_api_key:
-        # Strip surrounding quotes
-        if (bedrock_api_key.startswith('"') and bedrock_api_key.endswith('"')) or (
-            bedrock_api_key.startswith("'") and bedrock_api_key.endswith("'")
-        ):
-            bedrock_api_key = bedrock_api_key[1:-1].strip()
-
-        lower = bedrock_api_key.lower()
-        if lower.startswith("authorization:"):
-            bedrock_api_key = bedrock_api_key.split(":", 1)[1].strip()
-            lower = bedrock_api_key.lower()
-        if lower.startswith("bearer "):
-            bedrock_api_key = bedrock_api_key.split(" ", 1)[1].strip()
-
-    # If a Bedrock API key is provided, prefer it and avoid mixing auth mechanisms.
-    if bedrock_api_key:
-        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = bedrock_api_key
-        access_key = ""
-        secret_key = ""
-        session_token = ""
-    else:
-        # Clear if user removed it in settings
-        if os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
-            os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
-        access_key = (settings.get("aws_access_key_id") or "").strip()
-        secret_key = (settings.get("aws_secret_access_key") or "").strip()
-        session_token = (settings.get("aws_session_token") or "").strip()
-    region_name = (region or settings.get("aws_region") or "us-east-1").strip()
-
-    kwargs = {
-        "service_name": service_name,
-        "region_name": region_name,
-    }
-
-    if access_key and secret_key:
-        kwargs.update(
-            {
-                "aws_access_key_id": access_key,
-                "aws_secret_access_key": secret_key,
-            }
-        )
-        if session_token:
-            kwargs["aws_session_token"] = session_token
-
-    # -------------------------------------------------------------------------
-    # RETRY CONFIGURATION (Fix for ServiceUnavailableException / Throttling)
-    # -------------------------------------------------------------------------
-    # Standard retries are often insufficient for high-concurrency Bedrock usage.
-    # Adaptive mode allows standard retry logic to dynamically adjust for
-    # optimal request rates.
-    retry_config = Config(
-        retries={
-            'max_attempts': 10,
-            'mode': 'adaptive'
-        },
-        read_timeout=900,
-        connect_timeout=900,
-    )
-    kwargs["config"] = retry_config
-
-    return boto3.client(**kwargs)
+# _make_aws_client is imported from core.llm_providers
 
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f:
@@ -927,6 +857,12 @@ async def set_active_agent_endpoint(req: AgentActiveRequest):
         raise HTTPException(status_code=404, detail="Agent not found")
     
     active_agent_id = req.agent_id
+    # CRITICAL: Also update the SOURCE module's variable.
+    # `from core.routes.agents import active_agent_id` created a new binding
+    # in this module, so `get_active_agent_data()` (in agents.py) still reads
+    # the agents module's copy. We must sync both.
+    import core.routes.agents as _agents_mod
+    _agents_mod.active_agent_id = req.agent_id
     print(f"Active Agent switched to: {active_agent_id}")
     return {"status": "success", "active_agent_id": active_agent_id}
 
@@ -1145,6 +1081,9 @@ async def chat(request: ChatRequest):
     # -- Load Active Agent Logic --
     active_agent = get_active_agent_data()
     allowed_tools = active_agent.get("tools", ["all"])
+    if "collect_data" not in allowed_tools:
+        allowed_tools.append("collect_data")
+        
     agent_system_template = active_agent.get("system_prompt", NATIVE_TOOL_SYSTEM_PROMPT)
     
     print(f"DEBUG: Using Agent '{active_agent.get('name')}' with tools: {allowed_tools}")
@@ -1671,7 +1610,7 @@ async def chat(request: ChatRequest):
 
     # 4. Inject Short-Term History
     # 4. Inject Short-Term History
-    recent_history_messages = get_recent_history_messages(session_id)
+    recent_history_messages = get_recent_history_messages(session_id, agent_id=active_agent_id)
     
     # Context for LLM (Text-based Fallback for non-native logic or logging)
     # We still keep a text version for "current_context" used in loop logic if needed, 
@@ -1824,6 +1763,18 @@ Examples:
                 
                 last_tool_signature = current_tool_signature
 
+                # ── EXECUTION GUARD: Block tools not in this agent's allowed list ──
+                always_allowed = {
+                    "get_current_session_context", "clear_session_context",
+                    "query_past_conversations", "decide_search_or_analyze",
+                    "search_embedded_report", "embed_report_for_exploration"
+                }
+                if "all" not in allowed_tools and tool_name not in allowed_tools and tool_name not in always_allowed:
+                    block_msg = f"Tool '{tool_name}' is not available for this agent. Available tools: {', '.join(allowed_tools)}. Please use only your available tools."
+                    print(f"\n⛔ BLOCKED TOOL CALL: {tool_name} (not in allowed_tools: {allowed_tools})")
+                    current_context_text += f"\nSystem: {block_msg}\n"
+                    continue
+
                 # 1. Internal Tool: Session Context
                 if tool_name == "get_current_session_context":
                      ss = _get_session_state(session_id)
@@ -1843,7 +1794,8 @@ Examples:
                                  session_id=session_id,
                                  tool_name=tool_name,
                                  tool_args={},
-                                 tool_output=raw_output
+                                 tool_output=raw_output,
+                                 agent_id=active_agent_id
                              )
                          except Exception as e:
                              print(f"DEBUG: Error storing context tool in memory: {e}")
@@ -1874,7 +1826,8 @@ Examples:
                                 session_id=session_id,
                                 tool_name=tool_name,
                                 tool_args={"scope": scope},
-                                tool_output=raw_output
+                                tool_output=raw_output,
+                                agent_id=active_agent_id
                             )
                         except Exception as e:
                             print(f"DEBUG: Error storing clear context in memory: {e}")
@@ -1910,7 +1863,8 @@ Examples:
                                     session_id=session_id,
                                     tool_name=tool_name,
                                     tool_args=tool_args,
-                                    tool_output=raw_output
+                                    tool_output=raw_output,
+                                    agent_id=active_agent_id
                                 )
                             except Exception as e:
                                 print(f"DEBUG: Error storing decision in memory: {e}")
@@ -2188,7 +2142,8 @@ Examples:
                                              session_id=session_id,
                                              tool_name=tool_name,
                                              tool_args=tool_args,
-                                             tool_output=raw_output
+                                             tool_output=raw_output,
+                                             agent_id=active_agent_id
                                          )
                                  except Exception as e:
                                      print(f"DEBUG: Error storing custom tool in memory: {e}")
@@ -2270,7 +2225,8 @@ Examples:
                                 session_id=session_id,
                                 tool_name=tool_name,
                                 tool_args=tool_args,
-                                tool_output=raw_output
+                                tool_output=raw_output,
+                                agent_id=active_agent_id
                             )
                         except Exception as e:
                             print(f"DEBUG: Error storing tool execution in memory: {e}")
@@ -2293,11 +2249,11 @@ Examples:
         
     # 4. Save to Memory (Background Task ideal, but inline for POC)
     if memory_store and final_response:
-        memory_store.add_memory("user", user_message, metadata={"session_id": session_id})
-        memory_store.add_memory("assistant", final_response, metadata={"session_id": session_id})
+        memory_store.add_memory("user", user_message, metadata={"session_id": session_id, "agent_id": active_agent_id})
+        memory_store.add_memory("assistant", final_response, metadata={"session_id": session_id, "agent_id": active_agent_id})
         
     # Save to Short-Term History (session-scoped)
-    _get_conversation_history(session_id).append({
+    _get_conversation_history(session_id, agent_id=active_agent_id).append({
         "user": user_message,
         "assistant": final_response,
         "tools": tools_used_summary
@@ -2343,16 +2299,27 @@ async def chat_stream(request: ChatRequest):
             tool_schema_map = {}  # name -> inputSchema
             
             # -- Load Active Agent Logic --
-            try:
-                # Helper to get active agent data (mock implementation if missing)
-                # In chat_stream we don't have get_active_agent_data imported or defined in scope?
-                # Actually it seems it was available.
+            # Prefer agent_id from the request (sent by frontend) over the global
+            # because the global resets on uvicorn reload.
+            request_agent_id = request.agent_id
+            if request_agent_id:
+                # Look up agent data by the request-provided ID
+                agents = load_user_agents()
+                active_agent = next((a for a in agents if a["id"] == request_agent_id), None)
+                if not active_agent:
+                    print(f"⚠️ Agent '{request_agent_id}' from request not found, falling back to global")
+                    active_agent = get_active_agent_data()
+            else:
                 active_agent = get_active_agent_data()
-            except:
-                # Fallback if function not available
-                active_agent = {"tools": ["all"], "type": "general"}
+
+            # Also sync the global so other endpoints stay consistent
+            active_agent_id_for_session = active_agent.get("id", active_agent_id)
 
             allowed_tools = active_agent.get("tools", ["all"])
+            if "collect_data" not in allowed_tools:
+                allowed_tools.append("collect_data")
+                
+            print(f"DEBUG: 🎯 Active agent: id={active_agent.get('id')}, name={active_agent.get('name')}, allowed_tools={allowed_tools}")
             
             # CRITICAL: Auto-inject RAG tools for ANY analysis agent
             if active_agent.get("type") == "analysis":
@@ -2457,6 +2424,10 @@ For questions about this data:
             # 2. System Prompt
             ollama_tools = [{'type': 'function', 'function': {'name': t.name, 'description': t.description, 'parameters': t.inputSchema}} for t in all_tools]
             tools_json = str([{'tool': t.name, 'description': t.description, 'schema': t.inputSchema} for t in all_tools])
+            
+            # Debug: Log exactly which tools will be visible to the LLM
+            tool_names_for_llm = [t.name for t in all_tools]
+            print(f"DEBUG: 🔧 Tools sent to LLM ({len(tool_names_for_llm)}): {tool_names_for_llm}")
             
             TOOL_USAGE_INSTRUCTION = """
             
@@ -2782,7 +2753,7 @@ For questions about this data:
 
             # --- ReAct Loop with Streaming ---
             memory_context = ""
-            recent_history_messages = get_recent_history_messages(session_id)
+            recent_history_messages = get_recent_history_messages(session_id, agent_id=active_agent_id_for_session)
             current_context_text = f"User Request: {user_message}\n"
 
             # Inject session context
@@ -2798,7 +2769,8 @@ For questions about this data:
                 try:
                     recent_tools = memory_store.get_session_tool_outputs(
                         session_id=session_id,
-                        n_results=5
+                        n_results=5,
+                        agent_id=active_agent_id_for_session
                     )
                     
                     if recent_tools and recent_tools.get('documents'):
@@ -2863,11 +2835,25 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                     try:
                         cleaned_output = llm_output.replace("```json", "").replace("```", "").strip()
                         try:
+                            # Try parsing the whole string first
                             tool_call = json.loads(cleaned_output)
-                        except:
-                            json_match = re.search(r'\{.*\}', cleaned_output, re.DOTALL)
-                            if json_match:
-                                tool_call = json.loads(json_match.group(0))
+                        except Exception as e:
+                            # Find the first { and decode exactly one JSON object
+                            start_idx = cleaned_output.find('{')
+                            if start_idx != -1:
+                                decoder = json.JSONDecoder()
+                                try:
+                                    # raw_decode extracts the first valid JSON object and ignores the rest
+                                    tool_call, _ = decoder.raw_decode(cleaned_output[start_idx:])
+                                except ValueError:
+                                    # Fallback to greedy regex method just in case
+                                    json_match = re.search(r'\{.*\}', cleaned_output, re.DOTALL)
+                                    if json_match:
+                                        tool_call = json.loads(json_match.group(0))
+                                    else:
+                                        raise e
+                            else:
+                                raise e
                     except Exception as e:
                         json_error = str(e)
 
@@ -2876,9 +2862,19 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                     print(f"[DEBUG] Parsed tool_call: {tool_call}")
                     
                     if json_error:
-                        print(f"[DEBUG] JSON Parsing Error: {json_error}")
-                        current_context_text += f"\nSystem: JSON Parsing Error: {json_error}. Please Try Again with valid JSON.\n"
-                        continue
+                        # Check if the output was actually attempting to be a tool call (contains '{')
+                        # If it doesn't contain '{', it's a plain text final response, not an error
+                        cleaned_for_check = llm_output.replace("```json", "").replace("```", "").strip()
+                        if '{' in cleaned_for_check:
+                            # Output looked like JSON but failed to parse — ask LLM to retry
+                            print(f"[DEBUG] JSON Parsing Error (malformed JSON): {json_error}")
+                            current_context_text += f"\nSystem: JSON Parsing Error: {json_error}. Please Try Again with valid JSON.\n"
+                            continue
+                        else:
+                            # Output is plain text — this IS the final answer, break out
+                            print(f"[DEBUG] No JSON detected in output. Treating as final response.")
+                            final_response = llm_output
+                            break
 
                     # Support both formats: {"tool": "...", "arguments": {...}} and {"name": "...", "arguments": {...}}
                     if tool_call and isinstance(tool_call, dict) and ("tool" in tool_call or "name" in tool_call):
@@ -2907,6 +2903,22 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                             current_context_text += f"\nSystem: You just called '{tool_name}' with these exact arguments. STOP. Summarize the results.\n"
                             continue
 
+                        # ── EXECUTION GUARD: Block tools not in this agent's allowed list ──
+                        # Virtual/internal tools are always permitted
+                        always_allowed = {
+                            "get_current_session_context", "clear_session_context",
+                            "query_past_conversations", "decide_search_or_analyze",
+                            "search_embedded_report", "embed_report_for_exploration"
+                        }
+                        if "all" not in allowed_tools and tool_name not in allowed_tools and tool_name not in always_allowed:
+                            block_msg = f"Tool '{tool_name}' is not available for this agent. Available tools: {', '.join(allowed_tools)}. Please use only your available tools."
+                            print(f"\n⛔ BLOCKED TOOL CALL: {tool_name} (not in allowed_tools: {allowed_tools})")
+                            current_context_text += f"\nSystem: {block_msg}\n"
+                            
+                            yield f"data: {json.dumps({'type': 'tool_result', 'tool_name': tool_name, 'preview': '⛔ Blocked: Tool not available for this agent'})}\n\n"
+                            await asyncio.sleep(0)
+                            continue
+
                         # Execute tool (internal tools)
                         if tool_name == "get_current_session_context":
                             ss = _get_session_state(session_id)
@@ -2932,7 +2944,8 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                                         session_id=session_id,
                                         tool_name=tool_name,
                                         tool_args={},
-                                        tool_output=raw_output
+                                        tool_output=raw_output,
+                                        agent_id=active_agent_id_for_session
                                     )
                                 except Exception as e:
                                     print(f"DEBUG: Error storing context tool: {e}")
@@ -2965,7 +2978,8 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                                         session_id=session_id,
                                         tool_name=tool_name,
                                         tool_args={"scope": scope},
-                                        tool_output=raw_output
+                                        tool_output=raw_output,
+                                        agent_id=active_agent_id_for_session
                                     )
                                 except Exception as e:
                                     print(f"DEBUG: Error storing clear context: {e}")
@@ -3371,7 +3385,8 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                                                     session_id=session_id,
                                                     tool_name=tool_name,
                                                     tool_args=tool_args,
-                                                    tool_output=raw_output
+                                                    tool_output=raw_output,
+                                                    agent_id=active_agent_id_for_session
                                                 )
                                         except Exception as e:
                                             print(f"DEBUG: Error storing custom tool: {e}")
@@ -3451,7 +3466,8 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
                                         session_id=session_id,
                                         tool_name=tool_name,
                                         tool_args=tool_args,
-                                        tool_output=raw_output
+                                        tool_output=raw_output,
+                                        agent_id=active_agent_id_for_session
                                     )
                                 except Exception as e:
                                     print(f"DEBUG: Error storing tool execution: {e}")
@@ -3478,11 +3494,11 @@ When you detect the user wants to start a NEW operation, call clear_session_cont
 
             # Save to memory
             if memory_store and final_response:
-                memory_store.add_memory("user", user_message, metadata={"session_id": session_id})
-                memory_store.add_memory("assistant", final_response, metadata={"session_id": session_id})
+                memory_store.add_memory("user", user_message, metadata={"session_id": session_id, "agent_id": active_agent_id_for_session})
+                memory_store.add_memory("assistant", final_response, metadata={"session_id": session_id, "agent_id": active_agent_id_for_session})
             
             # Save to short-term history
-            _get_conversation_history(session_id).append({
+            _get_conversation_history(session_id, agent_id=active_agent_id_for_session).append({
                 "user": user_message,
                 "assistant": final_response,
                 "tools": tools_used_summary

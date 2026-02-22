@@ -68,12 +68,6 @@ export const CAPABILITIES = [
         tools: ['get_datetime']
     },
     {
-        id: 'collect_data',
-        label: 'Data Collection',
-        description: 'Request user input via dynamic forms.',
-        tools: ['collect_data']
-    },
-    {
         id: 'personal_details',
         label: 'Personal Details',
         description: 'Get saved personal info (name, phone, address).',

@@ -21,55 +21,41 @@ export const IntegrationsTab = ({
             {/* FIXED: Changed bg-zinc-950/50 to bg-zinc-950 to remove opacity and fix light mode grey issue */}
             <div className="p-4 border-b border-zinc-800 bg-zinc-950 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                    <div className={`h-2 w-2 ${credentials ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]' : 'bg-red-500'}`} />
+                    <div className={`h-2 w-2 ${credentials?.is_connected ? 'bg-green-500 shadow-[0_0_10px_rgba(34,197,94,0.5)]' : 'bg-red-500'}`} />
                     <span className="text-sm font-bold text-zinc-400">Connection Status</span>
                 </div>
-                <span className={`text-xs px-2 py-1 bg-zinc-900 border border-zinc-800 ${credentials ? 'text-green-400' : 'text-zinc-500'}`}>
-                    {credentials ? 'CONNECTED' : 'DISCONNECTED'}
+                <span className={`text-xs px-2 py-1 bg-zinc-900 border border-zinc-800 ${credentials?.is_connected ? 'text-green-400' : 'text-zinc-500'}`}>
+                    {credentials?.is_connected ? 'CONNECTED' : 'DISCONNECTED'}
                 </span>
             </div>
 
             <div className="p-6 space-y-6">
-                {credentials ? (
-                    <div className="space-y-4">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                            <div className="p-3 bg-black border border-zinc-800">
-                                <span className="block text-zinc-500 mb-1">Client ID</span>
-                                <span className="font-mono text-zinc-300 break-all">{credentials.client_id?.substring(0, 20)}...</span>
-                            </div>
-                            <div className="p-3 bg-black border border-zinc-800">
-                                <span className="block text-zinc-500 mb-1">Project ID</span>
-                                <span className="font-mono text-zinc-300">{credentials.project_id}</span>
-                            </div>
-                        </div>
 
-                        <a
-                            href="/auth/login"
-                            className="flex items-center justify-center gap-2 w-full bg-white text-black py-3 text-sm font-bold hover:bg-zinc-200 transition-colors uppercase tracking-wide"
-                        >
-                            <Shield className="h-4 w-4" />
-                            {credentials.token_uri ? "Reconnect Account" : "Connect Account"}
-                        </a>
-                    </div>
-                ) : (
-                    <div className="text-center py-8 px-4">
-                        <Shield className="h-12 w-12 text-zinc-700 mx-auto mb-4" />
-                        <h3 className="text-white font-bold mb-2">No Credentials Found</h3>
-                        <p className="text-sm text-zinc-500 max-w-sm mx-auto mb-6">
-                            To use Google Workspace features (Gmail, Drive, Calendar), you need to configure OAuth credentials.
-                        </p>
+                <div className="text-center py-6 px-4">
+                    <Shield className="h-8 w-8 text-zinc-700 mx-auto mb-3" />
+                    <h3 className="text-base text-white font-bold mb-1">Google Workspace Setup</h3>
+                    <p className="text-xs text-zinc-500 max-w-sm mx-auto mb-4">
+                        To use features like Gmail, Drive, and Calendar, connect your account.
+                    </p>
 
-                        <div className="text-left text-xs bg-black p-4 border border-zinc-800 mb-6">
-                            <p className="font-bold text-zinc-300 mb-2">Quick Setup Guide:</p>
-                            <ol className="list-decimal pl-4 space-y-2 text-zinc-500">
-                                <li>Go to <a href="https://console.cloud.google.com/" target="_blank" className="text-blue-400 hover:text-blue-300 underline">Google Cloud Console</a> & create a Project.</li>
-                                <li>Enable: <em>Gmail, Drive, Calendar APIs</em>.</li>
-                                <li>Create OAuth Client ID (Desktop App).</li>
-                                <li>Download JSON and paste below.</li>
-                            </ol>
-                        </div>
+                    <div className="text-left text-[10px] bg-black p-3 border border-zinc-800 mb-5 max-w-md mx-auto">
+                        <p className="font-bold text-zinc-300 mb-1.5">Quick Setup Guide:</p>
+                        <ol className="list-decimal pl-4 space-y-1 text-zinc-500">
+                            <li>Go to <a href="https://console.cloud.google.com/" target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300 underline">Google Cloud Console</a> & create a Project.</li>
+                            <li>Enable <em>Gmail, Drive, Calendar APIs</em>.</li>
+                            <li>Create OAuth Client ID (Desktop App).</li>
+                            <li>Download JSON and paste below.</li>
+                        </ol>
                     </div>
-                )}
+
+                    <a
+                        href="/auth/login"
+                        className="inline-flex items-center justify-center gap-2 bg-white text-black px-6 py-2.5 text-xs font-bold hover:bg-zinc-200 transition-colors uppercase tracking-wide"
+                    >
+                        <Shield className="h-3.5 w-3.5" />
+                        {credentials?.token_uri ? "Reconnect Account" : "Connect Account"}
+                    </a>
+                </div>
 
                 <div className="border-t border-zinc-800 pt-6 space-y-4">
                     {/* Upload Area */}

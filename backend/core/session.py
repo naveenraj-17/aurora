@@ -18,10 +18,11 @@ session_state: dict[str, dict[str, Any]] = {}
 def _get_session_id(request: ChatRequest) -> str:
     return request.session_id or "default"
 
-def _get_conversation_history(session_id: str) -> deque:
-    if session_id not in conversation_histories:
-        conversation_histories[session_id] = deque(maxlen=10)
-    return conversation_histories[session_id]
+def _get_conversation_history(session_id: str, agent_id: str = None) -> deque:
+    key = f"{agent_id}_{session_id}" if agent_id else session_id
+    if key not in conversation_histories:
+        conversation_histories[key] = deque(maxlen=10)
+    return conversation_histories[key]
 
 def _get_session_state(session_id: str) -> dict[str, Any]:
     if session_id not in session_state:
@@ -159,10 +160,10 @@ def _extract_and_persist_ids(session_id: str, tool_name: str, tool_output: str):
         print(f"DEBUG: Could not extract IDs from tool output: {e}")
 
 
-def get_recent_history_messages(session_id: str):
-    """Returns a list of message dicts for the chat API."""
+def get_recent_history_messages(session_id: str, agent_id: str = None):
+    """Returns a list of message dicts for the chat API, scoped by agent."""
     messages = []
-    for turn in _get_conversation_history(session_id):
+    for turn in _get_conversation_history(session_id, agent_id):
         messages.append({"role": "user", "content": turn['user']})
         # If tools were used, we should ideally represent them, but for now 
         # let's represent the final assistant response to keep context usage expected.
